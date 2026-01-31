@@ -13,6 +13,57 @@ import streamlit as st
 # Configure Gemini API
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
+# Injection patterns for local fallback detection
+INJECTION_PATTERNS = [
+    # Direct instruction override attempts
+    r'ignore\s+(all\s+)?(previous|above|prior)\s+(instructions?|prompts?|rules?)',
+    r'disregard\s+(all\s+)?(previous|above|prior)\s+(instructions?|prompts?)',
+    r'forget\s+(all\s+)?(previous|above|prior)\s+(instructions?|prompts?)',
+    r'override\s+(system|previous)\s+(prompt|instructions?)',
+    
+    # Role-switching attacks
+    r'you\s+are\s+now\s+(a|an|the)\s+',
+    r'act\s+as\s+(a|an|if)\s+',
+    r'pretend\s+(to\s+be|you\s+are)',
+    r'roleplay\s+as',
+    r'switch\s+(to|into)\s+.+\s+mode',
+    r'enter\s+.+\s+mode',
+    r'activate\s+.+\s+mode',
+    
+    # Jailbreak attempts
+    r'(dan|dude|devil|evil)\s*mode',
+    r'jailbreak',
+    r'bypass\s+(safety|security|filters?|restrictions?)',
+    r'disable\s+(safety|security|filters?|restrictions?)',
+    r'remove\s+(all\s+)?(restrictions?|limitations?|filters?)',
+    
+    # System prompt extraction
+    r'(show|reveal|display|print|output)\s+(me\s+)?(your|the|system)\s+(prompt|instructions?)',
+    r'what\s+(are|is)\s+your\s+(system\s+)?(prompt|instructions?)',
+    r'repeat\s+(your|the)\s+(system\s+)?(prompt|instructions?)',
+    
+    # Developer/admin impersonation
+    r'(i\s+am|this\s+is)\s+(the\s+)?(developer|admin|administrator|owner|creator)',
+    r'developer\s+override',
+    r'admin\s+(access|mode|override)',
+    r'maintenance\s+mode',
+    
+    # Delimiter injection
+    r'```\s*(system|prompt|instruction)',
+    r'\[\[system\]\]',
+    r'\{\{system\}\}',
+    r'<\s*system\s*>',
+    
+    # Encoding tricks mentioned explicitly
+    r'base64\s*:',
+    r'decode\s+this',
+    r'rot13',
+    r'hex\s*:',
+]
+
+# Compile patterns for efficiency
+COMPILED_PATTERNS = [re.compile(p, re.IGNORECASE) for p in INJECTION_PATTERNS]
+
 
 def sanitize_input(user_input: str) -> str:
     """
@@ -64,7 +115,7 @@ def security_guardrail(sanitized_input: str, chat_history: list = None) -> dict:
         chat_history = []
     
     # Initialize the Gemini model
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-2.5-flash')
     
     # Sandwich Defense Prompt Construction
     # Layer 1: Top bread - Initial instructions
@@ -138,16 +189,42 @@ Examples:
         return result
         
     except json.JSONDecodeError as e:
-        # If JSON parsing fails, return a safe default (block suspicious input)
-        return {
-            "is_malicious": True,
-            "reason": f"Failed to parse security response: {str(e)}",
-            "confidence": 0.5
-        }
+        # If JSON parsing fails, fall back to local detection
+        return local_pattern_detector(sanitized_input)
     except Exception as e:
-        # For any other errors, fail closed (block the request)
-        return {
-            "is_malicious": True,
-            "reason": f"Security check error: {str(e)}",
-            "confidence": 0.5
-        }
+        # For API errors (quota, network, etc.), fall back to local detection
+        return local_pattern_detector(sanitized_input)
+
+
+def local_pattern_detector(text: str) -> dict:
+    """
+    Local rule-based fallback detector when LLM API is unavailable.
+    Uses regex patterns to detect common injection attempts.
+    
+    Args:
+        text: The sanitized user input to analyze.
+        
+    Returns:
+        Dictionary with keys: is_malicious (bool), reason (str), confidence (float)
+    """
+    text_lower = text.lower()
+    
+    for i, pattern in enumerate(COMPILED_PATTERNS):
+        match = pattern.search(text_lower)
+        if match:
+            # Found a matching injection pattern
+            matched_text = match.group(0)
+            return {
+                "is_malicious": True,
+                "reason": f"Detected injection pattern: '{matched_text}'",
+                "confidence": 0.85,
+                "detection_method": "local_pattern"
+            }
+    
+    # No patterns matched - consider safe
+    return {
+        "is_malicious": False,
+        "reason": "No injection patterns detected (local analysis)",
+        "confidence": 0.7,
+        "detection_method": "local_pattern"
+    }
