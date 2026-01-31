@@ -64,7 +64,7 @@ def security_guardrail(sanitized_input: str, chat_history: list = None) -> dict:
         chat_history = []
     
     # Initialize the Gemini model
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-3-pro-preview')
     
     # Sandwich Defense Prompt Construction
     # Layer 1: Top bread - Initial instructions
