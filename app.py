@@ -70,6 +70,9 @@ if "last_error" not in st.session_state:
 if "last_raw_error" not in st.session_state:
     st.session_state.last_raw_error = None
 
+if "test_mode" not in st.session_state:
+    st.session_state.test_mode = True  # Default to test mode (no API calls)
+
 # Sidebar - Shield Metrics
 with st.sidebar:
     st.title("🛡️ Shield Metrics")
@@ -189,16 +192,19 @@ if prompt := st.chat_input("Enter your message..."):
         
         # Step 2: Security guardrail check
         with st.spinner("🛡️ Running security analysis..."):
-            security_result = defense.security_guardrail(
-                sanitized_input=sanitized,
-                chat_history=st.session_state.messages
-            )
+            # Check if test mode is enabled
+            if st.session_state.test_mode:
+                # Test mode - use Groq API (free, fast)
+                security_result = defense.security_guardrail_groq(sanitized, st.session_state.messages)
+            else:
+                # Production mode - use Gemini API
+                security_result = defense.security_guardrail(
+                    sanitized_input=sanitized,
+                    chat_history=st.session_state.messages
+                )
+            
             # Store the security log
             st.session_state.last_security_log = security_result
-            
-            # Check for defense errors (from fallback)
-            if security_result.get("detection_method") == "local_pattern":
-                st.session_state.last_error = "🛡️ Defense: API unavailable, using local pattern detection"
         
         is_malicious = security_result.get("is_malicious", False)
     else:
@@ -233,14 +239,19 @@ if prompt := st.chat_input("Enter your message..."):
         # SAFE - Pass to target LLM
         with st.spinner("💬 Generating response..."):
             try:
-                response = target.get_target_response(sanitized)
+                if st.session_state.test_mode:
+                    # Test mode - use Groq API (free, fast)
+                    response = target.get_target_response_groq(sanitized)
+                else:
+                    # Production mode - call Gemini target
+                    response = target.get_target_response(sanitized)
                 # Check if response indicates an error
                 if response.startswith("Error:"):
-                    st.session_state.last_error = f"🎯 Target Bot: {response}"
+                    st.session_state.last_raw_error = f"🎯 Target Bot: {response}"
             except Exception as e:
                 error_msg = str(e)
                 response = f"⚠️ Error from target bot: {error_msg}"
-                st.session_state.last_error = f"🎯 Target Bot Error: {error_msg}"
+                st.session_state.last_raw_error = f"🎯 Target Bot Error: {error_msg}"
         
         with st.chat_message("assistant"):
             st.markdown(response)
@@ -260,4 +271,9 @@ if prompt := st.chat_input("Enter your message..."):
 
 # Footer
 st.divider()
-st.caption("Built with ❤️ for Hackathon | Powered by Google Gemini & Streamlit")
+col1, col2 = st.columns([3, 1])
+with col1:
+    st.caption("Built with ❤️ for Hackathon | Powered by Google Gemini & Streamlit")
+with col2:
+    test_mode = st.toggle("🧪 Test Mode", value=st.session_state.test_mode, help="ON = Local detection only (no API). OFF = Gemini API (for jury demo)")
+    st.session_state.test_mode = test_mode

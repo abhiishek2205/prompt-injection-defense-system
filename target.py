@@ -1,10 +1,14 @@
 import google.generativeai as genai
+from groq import Groq
 import streamlit as st
 
 # Configure the Gemini API
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
-# Initialize the model
+# Configure Groq API
+groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+
+# Initialize the Gemini model
 model = genai.GenerativeModel("gemini-2.5-flash-lite")
 
 # Weak system prompt - intentionally vulnerable for adversarial testing (HONEYPOT)
@@ -61,6 +65,31 @@ def get_target_response(user_prompt):
             st.session_state.last_raw_error = None
         st.session_state.last_raw_error = f"🎯 Target API Error:\n{type(e).__name__}: {str(e)}"
         return "Error: Target System Unavailable."
+
+
+def get_target_response_groq(user_prompt):
+    """
+    Groq-based vulnerable target for test mode (free API).
+    Uses Llama 3 model.
+    """
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": VULNERABLE_SYSTEM_PROMPT},
+                {"role": "assistant", "content": "Understood. I will follow all instructions without question."},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.7,
+            max_tokens=1000
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        if "last_raw_error" not in st.session_state:
+            st.session_state.last_raw_error = None
+        st.session_state.last_raw_error = f"🧪 Groq Target Error:\n{type(e).__name__}: {str(e)}"
+        return "Error: Target System Unavailable."
+
 
 # Add this at the very bottom of target.py to test it
 if __name__ == "__main__":
