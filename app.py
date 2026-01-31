@@ -61,9 +61,33 @@ if "safe_count" not in st.session_state:
 if "last_security_log" not in st.session_state:
     st.session_state.last_security_log = None
 
+if "shield_enabled" not in st.session_state:
+    st.session_state.shield_enabled = True
+
+if "last_error" not in st.session_state:
+    st.session_state.last_error = None
+
+if "last_raw_error" not in st.session_state:
+    st.session_state.last_raw_error = None
+
 # Sidebar - Shield Metrics
 with st.sidebar:
     st.title("🛡️ Shield Metrics")
+    st.divider()
+    
+    # Shield Toggle
+    shield_on = st.toggle(
+        "🛡️ Defense Shield",
+        value=st.session_state.shield_enabled,
+        help="Toggle OFF to demo vulnerable target without protection"
+    )
+    st.session_state.shield_enabled = shield_on
+    
+    if shield_on:
+        st.success("🟢 SHIELD ACTIVE")
+    else:
+        st.error("🔴 SHIELD DOWN - VULNERABLE")
+    
     st.divider()
     
     # Metrics display with custom styling
@@ -107,12 +131,27 @@ with st.sidebar:
     
     st.divider()
     
+    # Error Log Expander - Shows RAW API errors
+    with st.expander("⚠️ System Errors", expanded=st.session_state.last_raw_error is not None):
+        if st.session_state.last_raw_error:
+            st.code(st.session_state.last_raw_error, language="text")
+            if st.button("🗑️ Clear Error", key="clear_error"):
+                st.session_state.last_raw_error = None
+                st.rerun()
+        else:
+            st.success("✅ No errors")
+    
+    st.divider()
+    
     # Reset button
     if st.button("🔄 Reset Session", use_container_width=True):
         st.session_state.messages = []
         st.session_state.blocked_count = 0
         st.session_state.safe_count = 0
         st.session_state.last_security_log = None
+        st.session_state.shield_enabled = True
+        st.session_state.last_error = None
+        st.session_state.last_raw_error = None
         st.rerun()
 
 # Main content area
@@ -141,22 +180,36 @@ if prompt := st.chat_input("Enter your message..."):
         "content": prompt
     })
     
-    # Step 1: Sanitize input
-    with st.spinner("🔍 Sanitizing input..."):
-        sanitized = defense.sanitize_input(prompt)
-        time.sleep(0.3)  # Brief visual feedback
-    
-    # Step 2: Security guardrail check
-    with st.spinner("🛡️ Running security analysis..."):
-        security_result = defense.security_guardrail(
-            sanitized_input=sanitized,
-            chat_history=st.session_state.messages
-        )
-        # Store the security log
-        st.session_state.last_security_log = security_result
+    # Check if shield is enabled
+    if st.session_state.shield_enabled:
+        # Step 1: Sanitize input
+        with st.spinner("🔍 Sanitizing input..."):
+            sanitized = defense.sanitize_input(prompt)
+            time.sleep(0.3)  # Brief visual feedback
+        
+        # Step 2: Security guardrail check
+        with st.spinner("🛡️ Running security analysis..."):
+            security_result = defense.security_guardrail(
+                sanitized_input=sanitized,
+                chat_history=st.session_state.messages
+            )
+            # Store the security log
+            st.session_state.last_security_log = security_result
+            
+            # Check for defense errors (from fallback)
+            if security_result.get("detection_method") == "local_pattern":
+                st.session_state.last_error = "🛡️ Defense: API unavailable, using local pattern detection"
+        
+        is_malicious = security_result.get("is_malicious", False)
+    else:
+        # Shield OFF - bypass all defense
+        sanitized = prompt
+        security_result = {"is_malicious": False, "reason": "Shield disabled", "confidence": 0.0}
+        st.session_state.last_security_log = {"status": "⚠️ SHIELD DISABLED", "message": "Defense bypassed for demo"}
+        is_malicious = False
     
     # Step 3: Conditional response based on security check
-    if security_result.get("is_malicious", False):
+    if is_malicious:
         # BLOCKED - Malicious input detected
         reason = security_result.get("reason", "Suspicious activity detected")
         confidence = security_result.get("confidence", 0.0)
@@ -181,8 +234,13 @@ if prompt := st.chat_input("Enter your message..."):
         with st.spinner("💬 Generating response..."):
             try:
                 response = target.get_target_response(sanitized)
+                # Check if response indicates an error
+                if response.startswith("Error:"):
+                    st.session_state.last_error = f"🎯 Target Bot: {response}"
             except Exception as e:
-                response = f"⚠️ Error from target bot: {str(e)}"
+                error_msg = str(e)
+                response = f"⚠️ Error from target bot: {error_msg}"
+                st.session_state.last_error = f"🎯 Target Bot Error: {error_msg}"
         
         with st.chat_message("assistant"):
             st.markdown(response)

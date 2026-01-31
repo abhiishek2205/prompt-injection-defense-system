@@ -115,7 +115,7 @@ def security_guardrail(sanitized_input: str, chat_history: list = None) -> dict:
         chat_history = []
     
     # Initialize the Gemini model
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    model = genai.GenerativeModel('gemini-2.5-flash-lite')
     
     # Sandwich Defense Prompt Construction
     # Layer 1: Top bread - Initial instructions
@@ -189,9 +189,17 @@ Examples:
         return result
         
     except json.JSONDecodeError as e:
+        # Store raw error in session state
+        if "last_raw_error" not in st.session_state:
+            st.session_state.last_raw_error = None
+        st.session_state.last_raw_error = f"🛡️ Defense JSON Parse Error:\n{type(e).__name__}: {str(e)}"
         # If JSON parsing fails, fall back to local detection
         return local_pattern_detector(sanitized_input)
     except Exception as e:
+        # Store raw error in session state
+        if "last_raw_error" not in st.session_state:
+            st.session_state.last_raw_error = None
+        st.session_state.last_raw_error = f"🛡️ Defense API Error:\n{type(e).__name__}: {str(e)}"
         # For API errors (quota, network, etc.), fall back to local detection
         return local_pattern_detector(sanitized_input)
 
