@@ -136,3 +136,9 @@ def run_evaluation():
 
 if __name__ == "__main__":
     run_evaluation()
+
+
+# Add this at the very bottom of evaluation.py
+if __name__ == "__main__":
+    print("🧪 Starting Evaluation...")
+    run_evaluation()
