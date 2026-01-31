@@ -73,6 +73,15 @@ if "last_raw_error" not in st.session_state:
 if "test_mode" not in st.session_state:
     st.session_state.test_mode = True  # Default to test mode (no API calls)
 
+if "reprompt_count" not in st.session_state:
+    st.session_state.reprompt_count = 0
+
+if "containment_count" not in st.session_state:
+    st.session_state.containment_count = 0
+
+if "last_containment_log" not in st.session_state:
+    st.session_state.last_containment_log = None
+
 # Sidebar - Shield Metrics
 with st.sidebar:
     st.title("🛡️ Shield Metrics")
@@ -114,6 +123,23 @@ with st.sidebar:
         )
         st.markdown('</div>', unsafe_allow_html=True)
     
+    # Additional metrics row for reprompt and containment
+    col3, col4 = st.columns(2)
+    with col3:
+        st.metric(
+            label="🔄 Reprompted",
+            value=st.session_state.reprompt_count,
+            delta=None,
+            help="Queries that were cleaned and resubmitted"
+        )
+    with col4:
+        st.metric(
+            label="🔒 Contained",
+            value=st.session_state.containment_count,
+            delta=None,
+            help="Responses with leaked data redacted"
+        )
+    
     st.divider()
     
     # Security Logs Expander
@@ -131,6 +157,19 @@ with st.sidebar:
             st.json(log)
         else:
             st.info("No security checks performed yet.")
+    
+    # Containment Logs Expander
+    with st.expander("🔒 Containment Logs", expanded=False):
+        if st.session_state.last_containment_log:
+            clog = st.session_state.last_containment_log
+            
+            if clog.get("is_leaked"):
+                st.error(f"🚨 LEAK DETECTED: {clog.get('leak_count', 0)} pattern(s) redacted")
+                st.json(clog.get("leaked_patterns", []))
+            else:
+                st.success("✅ No leaks in response")
+        else:
+            st.info("No containment checks performed yet.")
     
     st.divider()
     
@@ -151,7 +190,10 @@ with st.sidebar:
         st.session_state.messages = []
         st.session_state.blocked_count = 0
         st.session_state.safe_count = 0
+        st.session_state.reprompt_count = 0
+        st.session_state.containment_count = 0
         st.session_state.last_security_log = None
+        st.session_state.last_containment_log = None
         st.session_state.shield_enabled = True
         st.session_state.last_error = None
         st.session_state.last_raw_error = None
@@ -216,36 +258,93 @@ if prompt := st.chat_input("Enter your message..."):
     
     # Step 3: Conditional response based on security check
     if is_malicious:
-        # BLOCKED - Malicious input detected
-        reason = security_result.get("reason", "Suspicious activity detected")
-        confidence = security_result.get("confidence", 0.0)
+        # MALICIOUS DETECTED - Try reprompting first
+        with st.spinner("🔄 Attempting to extract legitimate query..."):
+            reprompt_result = defense.reprompt_malicious(
+                sanitized, 
+                security_result, 
+                use_groq=st.session_state.test_mode
+            )
         
-        block_message = f"🛡️ **BLOCKED**: {reason} (Confidence: {confidence:.0%})"
-        
-        with st.chat_message("assistant"):
-            st.error(block_message)
-        
-        # Add blocked message to history
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": block_message,
-            "blocked": True
-        })
-        
-        # Increment blocked count
-        st.session_state.blocked_count += 1
+        if reprompt_result.get("can_reprompt") and reprompt_result.get("reprompted_query"):
+            # REPROMPTED - We salvaged a legitimate query
+            reprompted_query = reprompt_result["reprompted_query"]
+            
+            # Show what happened
+            with st.chat_message("assistant"):
+                st.warning(f"🔄 **REPROMPTED**: Malicious content removed.\n\n"
+                          f"**Original threat**: {security_result.get('reason', 'Unknown')}\n\n"
+                          f"**Cleaned query**: \"{reprompted_query}\"")
+            
+            # Log the reprompt action
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": f"🔄 REPROMPTED: {reprompt_result.get('explanation', '')}",
+                "reprompted": True
+            })
+            
+            st.session_state.reprompt_count += 1
+            
+            # Now send the cleaned query to target
+            with st.spinner("💬 Generating response for cleaned query..."):
+                try:
+                    if st.session_state.test_mode:
+                        response = target.get_target_response_groq(reprompted_query)
+                    else:
+                        response = target.get_target_response(reprompted_query)
+                except Exception as e:
+                    response = f"⚠️ Error: {str(e)}"
+            
+            # Apply containment to the response
+            containment_result = defense.contain_output(response)
+            st.session_state.last_containment_log = containment_result
+            
+            if containment_result.get("is_leaked"):
+                response = containment_result["filtered_response"]
+                st.session_state.containment_count += 1
+            
+            with st.chat_message("assistant"):
+                if containment_result.get("is_leaked"):
+                    st.warning(f"🔒 **CONTAINED**: {containment_result.get('leak_count', 0)} sensitive pattern(s) redacted")
+                st.markdown(response)
+            
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": response,
+                "blocked": False,
+                "contained": containment_result.get("is_leaked", False)
+            })
+            
+            st.session_state.safe_count += 1
+            
+        else:
+            # BLOCKED - No legitimate query could be salvaged
+            reason = security_result.get("reason", "Suspicious activity detected")
+            confidence = security_result.get("confidence", 0.0)
+            reprompt_explanation = reprompt_result.get("explanation", "No legitimate query found")
+            
+            block_message = f"🛡️ **BLOCKED**: {reason} (Confidence: {confidence:.0%})\n\n" \
+                           f"🔄 **Reprompt failed**: {reprompt_explanation}"
+            
+            with st.chat_message("assistant"):
+                st.error(block_message)
+            
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": block_message,
+                "blocked": True
+            })
+            
+            st.session_state.blocked_count += 1
         
     else:
         # SAFE - Pass to target LLM
         with st.spinner("💬 Generating response..."):
             try:
                 if st.session_state.test_mode:
-                    # Test mode - use Groq API (free, fast)
                     response = target.get_target_response_groq(sanitized)
                 else:
-                    # Production mode - call Gemini target
                     response = target.get_target_response(sanitized)
-                # Check if response indicates an error
                 if response.startswith("Error:"):
                     st.session_state.last_raw_error = f"🎯 Target Bot: {response}"
             except Exception as e:
@@ -253,17 +352,26 @@ if prompt := st.chat_input("Enter your message..."):
                 response = f"⚠️ Error from target bot: {error_msg}"
                 st.session_state.last_raw_error = f"🎯 Target Bot Error: {error_msg}"
         
+        # Apply containment to the response (even for "safe" inputs)
+        containment_result = defense.contain_output(response)
+        st.session_state.last_containment_log = containment_result
+        
+        if containment_result.get("is_leaked"):
+            response = containment_result["filtered_response"]
+            st.session_state.containment_count += 1
+        
         with st.chat_message("assistant"):
+            if containment_result.get("is_leaked"):
+                st.warning(f"🔒 **CONTAINED**: {containment_result.get('leak_count', 0)} sensitive pattern(s) redacted from response")
             st.markdown(response)
         
-        # Add response to history
         st.session_state.messages.append({
             "role": "assistant",
             "content": response,
-            "blocked": False
+            "blocked": False,
+            "contained": containment_result.get("is_leaked", False)
         })
         
-        # Increment safe count
         st.session_state.safe_count += 1
     
     # Rerun to update sidebar metrics
