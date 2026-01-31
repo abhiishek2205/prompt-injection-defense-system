@@ -1,5 +1,5 @@
 # Streamlit secrets (contains API keys)
-.streamlit/
+.streamlit/secrets.toml
 
 # Python
 __pycache__/
