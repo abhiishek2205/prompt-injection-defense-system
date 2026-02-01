@@ -517,22 +517,32 @@ OUTPUT_LEAK_PATTERNS = [
     r'(api[_\-]?key|secret[_\-]?key|access[_\-]?token)[:\s]*[A-Za-z0-9_\-]{20,}',
     r'bearer\s+[A-Za-z0-9_\-\.]+',
     
-    # Database credentials
-    r'(db[_\-]?pass|database[_\-]?password|mysql[_\-]?pass)[:\s]*[^\s]+',
+    # Database credentials - ALL fields (host, user, pass)
+    r'(db[_\-]?pass|database[_\-]?password|mysql[_\-]?pass)[:\s]*[^\s\n]+',
+    r'(db[_\-]?host|database[_\-]?host)[:\s]*[^\s\n]+',
+    r'(db[_\-]?user|database[_\-]?user)[:\s]*[^\s\n]+',
     r'(postgres|mysql|mongodb)://[^@]+:[^@]+@',  # Connection strings with passwords
     
     # SSN patterns
     r'\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b',  # SSN format XXX-XX-XXXX
     
-    # Explicit credential dumps (from our demo data)
+    # Explicit credential dumps (from our demo data) - ALL DB fields
     r'AWS_ACCESS_KEY_ID[:\s]*[A-Za-z0-9_]+',
     r'AWS_SECRET_ACCESS_KEY[:\s]*[A-Za-z0-9_/+=]+',
+    r'DB_HOST[:\s]*[^\s\n]+',
+    r'DB_USER[:\s]*[^\s\n]+',
     r'DB_PASS[:\s]*[^\s\n]+',
     r'SSN[:\s]*\d{3}[-\s]?\d{2}[-\s]?\d{4}',
     
     # Salary/HR data patterns
     r'salary[:\s]*\$?[\d,]+(/yr|/year)?',
     r'(ceo|cfo|cto|executive).*salary',
+    
+    # Catch demo-specific patterns (fake-demo-db, demo_admin, etc.)
+    r'fake[-_]?demo[-_]?db[^\s]*',
+    r'demo[-_]?admin',
+    r'DemoPassword\d*!?',
+    r's3://[^\s]+',  # S3 bucket URLs
 ]
 
 COMPILED_OUTPUT_PATTERNS = [re.compile(p, re.IGNORECASE) for p in OUTPUT_LEAK_PATTERNS]
