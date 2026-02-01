@@ -6,6 +6,7 @@ A Streamlit-based UI for demonstrating LLM security guardrails.
 import streamlit as st
 import defense
 import time
+from evaluation import get_ground_truth, TEST_CASES
 
 # Try to import target module, create mock if not available
 try:
@@ -81,6 +82,19 @@ if "containment_count" not in st.session_state:
 
 if "last_containment_log" not in st.session_state:
     st.session_state.last_containment_log = None
+
+# Evaluation metrics session state
+if "eval_fp" not in st.session_state:
+    st.session_state.eval_fp = 0  # False Positives
+
+if "eval_fn" not in st.session_state:
+    st.session_state.eval_fn = 0  # False Negatives
+
+if "eval_latencies" not in st.session_state:
+    st.session_state.eval_latencies = []  # Latency tracking
+
+if "last_eval_result" not in st.session_state:
+    st.session_state.last_eval_result = None  # Last evaluation result
 
 # Sidebar - Shield Metrics
 with st.sidebar:
@@ -197,7 +211,69 @@ with st.sidebar:
         st.session_state.shield_enabled = True
         st.session_state.last_error = None
         st.session_state.last_raw_error = None
+        st.session_state.eval_fp = 0
+        st.session_state.eval_fn = 0
+        st.session_state.eval_latencies = []
+        st.session_state.last_eval_result = None
         st.rerun()
+    
+    st.divider()
+    
+    # =========================================================================
+    # EVALUATION METRICS DASHBOARD
+    # =========================================================================
+    st.subheader("📊 Evaluation Metrics")
+    
+    # Error Rates
+    st.markdown("**Error Rates**")
+    eval_col1, eval_col2 = st.columns(2)
+    with eval_col1:
+        st.metric(
+            label="❌ False Positives",
+            value=st.session_state.eval_fp,
+            help="Safe prompts incorrectly blocked"
+        )
+    with eval_col2:
+        st.metric(
+            label="⚠️ False Negatives",
+            value=st.session_state.eval_fn,
+            help="Malicious prompts incorrectly allowed"
+        )
+    
+    # Latency
+    st.markdown("**Latency**")
+    if st.session_state.eval_latencies:
+        avg_latency = sum(st.session_state.eval_latencies) / len(st.session_state.eval_latencies)
+        max_latency = max(st.session_state.eval_latencies)
+        lat_col1, lat_col2 = st.columns(2)
+        with lat_col1:
+            st.metric(label="⏱️ Avg", value=f"{avg_latency:.0f}ms")
+        with lat_col2:
+            st.metric(label="🔺 Max", value=f"{max_latency:.0f}ms")
+    else:
+        st.caption("No latency data yet")
+    
+    st.caption(f"📋 Prompts analyzed: {len(st.session_state.eval_latencies)}")
+    
+    # Last Evaluation Result
+    with st.expander("📋 Last Evaluation", expanded=False):
+        if st.session_state.last_eval_result:
+            result = st.session_state.last_eval_result
+            st.markdown(f"**Prompt**: \"{result['prompt'][:50]}...\"" if len(result['prompt']) > 50 else f"**Prompt**: \"{result['prompt']}\"")
+            st.markdown(f"**Expected**: {result['expected']}")
+            st.markdown(f"**Predicted**: {result['predicted']}")
+            
+            if result['expected'] is None:
+                st.info("ℹ️ Prompt not in test database")
+            elif result['correct']:
+                st.success("✅ Correct!")
+            else:
+                if result['error_type'] == 'FP':
+                    st.error("❌ False Positive (safe marked malicious)")
+                else:
+                    st.warning("⚠️ False Negative (attack allowed)")
+        else:
+            st.info("No evaluations yet")
 
 # Main content area
 st.title("🛡️ Prompt Injection Defense System")
@@ -234,6 +310,9 @@ if prompt := st.chat_input("Enter your message..."):
         
         # Step 2: Security guardrail check
         with st.spinner("🛡️ Running security analysis..."):
+            # Start latency timer
+            start_time = time.perf_counter()
+            
             # Check if test mode is enabled
             if st.session_state.test_mode:
                 # Test mode - use Groq API (free, fast)
@@ -245,10 +324,45 @@ if prompt := st.chat_input("Enter your message..."):
                     chat_history=st.session_state.messages
                 )
             
+            # End latency timer
+            end_time = time.perf_counter()
+            latency_ms = (end_time - start_time) * 1000
+            st.session_state.eval_latencies.append(latency_ms)
+            
             # Store the security log
             st.session_state.last_security_log = security_result
         
         is_malicious = security_result.get("is_malicious", False)
+        
+        # =========================================================================
+        # EVALUATION METRICS: Compare prediction with ground truth
+        # =========================================================================
+        ground_truth = get_ground_truth(prompt)
+        predicted_label = "MALICIOUS" if is_malicious else "SAFE"
+        
+        eval_result = {
+            "prompt": prompt,
+            "expected": ground_truth["label"],
+            "predicted": predicted_label,
+            "method": ground_truth["method"],
+            "category": ground_truth["category"],
+            "correct": None,
+            "error_type": None
+        }
+        
+        if ground_truth["label"] is not None:
+            # Prompt is in test database - can evaluate
+            eval_result["correct"] = (predicted_label == ground_truth["label"])
+            
+            if not eval_result["correct"]:
+                if ground_truth["label"] == "SAFE" and predicted_label == "MALICIOUS":
+                    st.session_state.eval_fp += 1
+                    eval_result["error_type"] = "FP"
+                elif ground_truth["label"] == "MALICIOUS" and predicted_label == "SAFE":
+                    st.session_state.eval_fn += 1
+                    eval_result["error_type"] = "FN"
+        
+        st.session_state.last_eval_result = eval_result
     else:
         # Shield OFF - bypass all defense
         sanitized = prompt
