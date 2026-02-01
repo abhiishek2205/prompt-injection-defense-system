@@ -31,23 +31,242 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom CSS for colored metrics
-st.markdown("""
-<style>
-    [data-testid="stMetricValue"] {
-        font-size: 2rem;
-    }
-    .blocked-metric [data-testid="stMetricValue"] {
-        color: #ff4b4b;
-    }
-    .safe-metric [data-testid="stMetricValue"] {
-        color: #00c853;
-    }
-    .stChatMessage {
-        padding: 1rem;
-    }
-</style>
-""", unsafe_allow_html=True)
+# Initialize theme state BEFORE page config
+if "dark_mode" not in st.session_state:
+    st.session_state.dark_mode = True  # Default to dark theme
+
+# Custom CSS based on theme
+if st.session_state.dark_mode:
+    # DARK THEME (Default Streamlit-like)
+    st.markdown("""
+    <style>
+        /* ====== DARK THEME ====== */
+        
+        /* Theme toggle button styling */
+        .theme-btn button {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%) !important;
+            border: 1px solid #333 !important;
+            border-radius: 20px !important;
+            padding: 8px 16px !important;
+            font-size: 1.2rem !important;
+            transition: all 0.3s ease !important;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3) !important;
+        }
+        
+        .theme-btn button:hover {
+            transform: scale(1.05) !important;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4) !important;
+        }
+        
+        /* Metric styling */
+        [data-testid="stMetricValue"] {
+            font-size: 1.8rem;
+            font-weight: 700;
+        }
+        
+        .blocked-metric [data-testid="stMetricValue"] {
+            color: #FF4B4B !important;
+        }
+        
+        .safe-metric [data-testid="stMetricValue"] {
+            color: #00C853 !important;
+        }
+        
+        /* Chat styling */
+        .stChatMessage {
+            border-radius: 8px;
+        }
+        
+        /* Buttons */
+        .stButton > button {
+            border-radius: 8px;
+            font-weight: 600;
+        }
+        
+        /* Alerts */
+        [data-testid="stAlert"] {
+            border-radius: 8px;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+else:
+    # LIGHT THEME (Apple HIG)
+    st.markdown("""
+    <style>
+        /* ====== APPLE LIGHT THEME ====== */
+        
+        /* Theme toggle button styling */
+        .theme-btn button {
+            background: linear-gradient(135deg, #FFD93D 0%, #FF8C00 100%) !important;
+            border: none !important;
+            border-radius: 20px !important;
+            padding: 8px 16px !important;
+            font-size: 1.2rem !important;
+            transition: all 0.3s ease !important;
+            box-shadow: 0 2px 8px rgba(255,140,0,0.3) !important;
+            color: #1D1D1F !important;
+        }
+        
+        .theme-btn button:hover {
+            transform: scale(1.05) rotate(15deg) !important;
+            box-shadow: 0 4px 12px rgba(255,140,0,0.4) !important;
+        }
+        
+        /* 1. FORCE LIGHT BACKGROUND EVERYWHERE */
+        .stApp {
+            background-color: #F5F5F7 !important;
+        }
+        
+        [data-testid="stAppViewContainer"] {
+            background-color: #F5F5F7 !important;
+        }
+        
+        .main .block-container {
+            background-color: #F5F5F7 !important;
+        }
+        
+        [data-testid="stHeader"] {
+            background-color: rgba(245, 245, 247, 0.8) !important;
+            backdrop-filter: blur(10px);
+        }
+        
+        [data-testid="stToolbar"] {
+            background-color: transparent !important;
+        }
+        
+        /* 2. SIDEBAR - Frosted Glass */
+        section[data-testid="stSidebar"] {
+            background: rgba(255, 255, 255, 0.85) !important;
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+        }
+        
+        section[data-testid="stSidebar"] > div {
+            background: transparent !important;
+        }
+        
+        /* 3. TEXT COLORS - Dark text on light background */
+        .stApp, .stApp p, .stApp span, .stApp label, .stApp div {
+            color: #1D1D1F;
+        }
+        
+        h1, h2, h3 {
+            font-weight: 700 !important;
+            color: #1D1D1F !important;
+        }
+        
+        /* 4. METRICS - iOS Widget Cards */
+        [data-testid="stMetric"] {
+            background: #FFFFFF !important;
+            border-radius: 16px;
+            padding: 16px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+        }
+        
+        [data-testid="stMetricValue"] {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: #1D1D1F !important;
+        }
+        
+        [data-testid="stMetricLabel"] {
+            color: #6E6E73 !important;
+            font-size: 0.8rem;
+        }
+        
+        .blocked-metric [data-testid="stMetricValue"] {
+            color: #FF3B30 !important;
+        }
+        
+        .safe-metric [data-testid="stMetricValue"] {
+            color: #34C759 !important;
+        }
+        
+        /* 5. CHAT MESSAGES */
+        [data-testid="stChatMessage"] {
+            background: #FFFFFF !important;
+            border-radius: 12px !important;
+            padding: 12px !important;
+            margin-bottom: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+        }
+        
+        .stChatMessage p {
+            color: #1D1D1F !important;
+        }
+        
+        /* 6. CHAT INPUT */
+        [data-testid="stChatInput"] {
+            background: #FFFFFF !important;
+            border-radius: 24px !important;
+            border: 1px solid #D1D1D6 !important;
+        }
+        
+        [data-testid="stChatInput"] textarea {
+            background: #FFFFFF !important;
+            color: #1D1D1F !important;
+        }
+        
+        .stChatInputContainer {
+            background: #F5F5F7 !important;
+        }
+        
+        [data-testid="stBottom"] {
+            background: #F5F5F7 !important;
+        }
+        
+        [data-testid="stBottomBlockContainer"] {
+            background: #F5F5F7 !important;
+        }
+        
+        .stChatInput {
+            background: #FFFFFF !important;
+        }
+        
+        .stChatInput > div {
+            background: #FFFFFF !important;
+        }
+        
+        /* 7. BUTTONS - Apple Blue */
+        .stButton > button {
+            background: #007AFF !important;
+            color: white !important;
+            border: none !important;
+            border-radius: 10px !important;
+            font-weight: 600 !important;
+        }
+        
+        .stButton > button:hover {
+            background: #0062CC !important;
+        }
+        
+        /* 8. EXPANDERS */
+        [data-testid="stExpander"] {
+            background: #FFFFFF !important;
+            border-radius: 12px !important;
+            border: none !important;
+        }
+        
+        details summary {
+            color: #1D1D1F !important;
+        }
+        
+        /* 9. ALERTS */
+        [data-testid="stAlert"] {
+            border-radius: 12px !important;
+        }
+        
+        /* 10. DIVIDERS */
+        hr {
+            border: none;
+            border-top: 1px solid rgba(0, 0, 0, 0.08);
+        }
+        
+        .stCaption {
+            color: #86868B;
+        }
+    </style>
+    """, unsafe_allow_html=True)
 
 # Initialize session state
 if "messages" not in st.session_state:
@@ -275,8 +494,19 @@ with st.sidebar:
         else:
             st.info("No evaluations yet")
 
-# Main content area
-st.title("🛡️ Prompt Injection Defense System")
+# Main content area - Header with theme toggle
+header_col1, header_col2 = st.columns([6, 1])
+with header_col1:
+    st.title("🛡️ Prompt Injection Defense System")
+with header_col2:
+    # Compact animated theme toggle
+    theme_icon = "🌙" if st.session_state.dark_mode else "☀️"
+    st.markdown('<div class="theme-btn">', unsafe_allow_html=True)
+    if st.button(theme_icon, key="theme_toggle"):
+        st.session_state.dark_mode = not st.session_state.dark_mode
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
 st.caption("An AI-powered security layer that detects and blocks malicious prompts before they reach the target LLM.")
 
 st.divider()
