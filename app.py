@@ -725,7 +725,7 @@ if prompt := st.chat_input("Enter your message..."):
 st.divider()
 col1, col2 = st.columns([3, 1])
 with col1:
-    st.caption("Built with ❤️ for Hackathon | Powered by Google Gemini & Streamlit")
+    st.caption("Built by Team SRON")
 with col2:
     test_mode = st.toggle("🧪 Test Mode", value=st.session_state.test_mode, help="ON = Local detection only (no API). OFF = Gemini API (for jury demo)")
     st.session_state.test_mode = test_mode
