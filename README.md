@@ -7,6 +7,17 @@ on the left while credentials leak on the right — simultaneously.
 
 ---
 
+## 🌐 Live Demo
+
+| | Link |
+|--|------|
+| 🚀 **Live App** | [prompt-injection-defense-system-y9p.vercel.app](https://prompt-injection-defense-system-y9p.vercel.app) |
+| ⚙️ **Backend API** | [Railway Backend](https://prompt-injection-defense-system-production.up.railway.app) |
+| 📖 **API Docs** | [Swagger UI](https://prompt-injection-defense-system-production.up.railway.app/docs) |
+| 📁 **GitHub Repo** | [abhiishek2205/prompt-injection-defense-system](https://github.com/abhiishek2205/prompt-injection-defense-system) |
+
+---
+
 ## 📸 Demo
 
 | Shield ON | Shield OFF |
