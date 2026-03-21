@@ -1,0 +1,4 @@
+user.name=Abhishek
+user.email=abhishek@gmail.com
+credential.https://netrunner.kurukshetraceg.org.in.provider=generic
+init.defaultbranch=main
