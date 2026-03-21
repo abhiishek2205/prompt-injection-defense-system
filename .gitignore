@@ -1,6 +1,3 @@
-# Streamlit secrets (contains API keys)
-.streamlit/secrets.toml
-
 # Python
 __pycache__/
 *.py[cod]
@@ -20,4 +17,15 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
-"backend/.streamlit/secrets.toml" 
+
+# Deployment & Secrets
+.streamlit/secrets.toml
+backend/.streamlit/secrets.toml
+*.toml
+.env
+.env.production
+.env.development
+
+# Frontend
+node_modules/
+dist/

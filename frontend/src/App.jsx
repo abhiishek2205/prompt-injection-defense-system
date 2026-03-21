@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 
 // ─── API ────────────────────────────────────────────────────────────────────
-const API = 'http://localhost:8000'
+const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
 // ─── CATEGORIZED PRESET ATTACKS ──────────────────────────────────────────────
 const PRESET_CATEGORIES = [
