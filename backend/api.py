@@ -1,13 +1,23 @@
-import toml
 import os
 import sys
 
-# Load secrets from .streamlit/secrets.toml and set as env vars
-_secrets_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              ".streamlit", "secrets.toml")
-_secrets = toml.load(_secrets_path)
-os.environ["GEMINI_API_KEY"] = _secrets.get("GEMINI_API_KEY", "")
-os.environ["GROQ_API_KEY"] = _secrets.get("GROQ_API_KEY", "")
+# Secrets loader — works in BOTH environments:
+# Local dev: reads from .streamlit/secrets.toml
+# Production: reads from Railway environment variables
+_secrets_path = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    ".streamlit", "secrets.toml"
+)
+if os.path.exists(_secrets_path):
+    try:
+        import toml
+        _secrets = toml.load(_secrets_path)
+        os.environ.setdefault("GEMINI_API_KEY",
+            _secrets.get("GEMINI_API_KEY", ""))
+        os.environ.setdefault("GROQ_API_KEY",
+            _secrets.get("GROQ_API_KEY", ""))
+    except Exception:
+        pass
 
 # Add svnit_ps1 directory to path so defense/target/evaluation are found
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
