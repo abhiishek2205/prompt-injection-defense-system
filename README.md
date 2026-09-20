@@ -273,6 +273,31 @@ in the top bar as you test prompts.
 
 ---
 
+## 🧪 Tests
+
+Regression suite for the defense layers and the metrics bookkeeping. Runs
+fully offline — no API keys, no network calls (the target LLM and the LLM
+guardrail are stubbed).
+
+```bash
+cd backend
+pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest
+```
+
+`tests/test_defense.py` pins the local detector's behaviour against the
+labeled set in `evaluation.py`, including a hard **zero false positives**
+rule — a local false positive short-circuits the LLM guardrail
+(`security_guardrail_groq` returns on the first local match), so it cannot be
+recovered at runtime — and an accuracy floor that should be raised, never
+lowered, as coverage improves.
+
+`tests/test_api.py` covers session/counter accounting: every `/chat` path
+records exactly one latency sample, comparison mode moves the same counters
+as the normal path, and `SessionState` fields are per-instance.
+
+---
+
 ## 🔌 API Reference
 
 ### POST /chat

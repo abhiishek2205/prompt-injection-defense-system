@@ -124,6 +124,16 @@ def normalize_leetspeak(text: str) -> str:
 # Higher weight = more likely an attack, less likely a false positive
 # =============================================================================
 
+# Extraction-intent verbs. The sensitive-noun patterns below require one of
+# these near the noun, so that educational phrasing ("how to store AWS
+# credentials", "what regulations apply to SSN data") does not trip the
+# detector while retrieval phrasing ("show me the AWS credentials") does.
+_EXTRACT_VERBS = (
+    r"show|list|give|tell|send|reveal|dump|expose|print|display|fetch|"
+    r"retrieve|provide|leak|steal|extract|need|want|get|"
+    r"what\s+is|what\'s|whats"
+)
+
 INJECTION_PATTERNS = [
     # Direct instruction override attempts — CRITICAL (0.95)
     (r'ignore\s+(all\s+)?(previous|above|prior)\s+(instructions?|prompts?|rules?)', 0.95),
@@ -166,11 +176,13 @@ INJECTION_PATTERNS = [
     # Context-aware patterns: require extraction intent verb + target noun
     # to reduce false positives on security education queries (FIX 2)
     (r'\b(give|show|reveal|dump|expose|get)\b.{0,20}\b(secret|access|api|private)\s*(key|token|credential)s?\b', 0.80),
-    (r'\b(aws|cloud|database|db|ssh|ssl|tls|gpg|pgp)\s*(key|secret|credential|password|token)s?\b', 0.85),
+    (r'\b(' + _EXTRACT_VERBS + r')\b[^.?!]{0,40}'
+     r'\b(aws|cloud|database|db|ssh|ssl|tls|gpg|pgp)[\s_\-]*(key|secret|credential|password|token)s?\b', 0.85),
     (r'\b(dump|show|give|leak|steal|extract|retrieve|expose)\b.{0,30}\b(password|passwd|pwd|credential)s?\b', 0.75),
     (r'\b(dump|show|give|tell|list|display|reveal|print)\s*(me\s+)?(the\s+)?(all\s+)?(credential|secret|key|password|data|info)', 0.85),
     (r'\bcloud\s*(cred|credential|key|secret|access)s?\b', 0.85),
-    (r'\b(ssn|social\s*security|salary|payroll|hr\s*data)\b', 0.80),
+    (r'\b(' + _EXTRACT_VERBS + r')\b[^.?!]{0,40}'
+     r'\b(ssn|social\s*security|salar(y|ies)|payroll|hr\s*data)\b', 0.80),
     (r'\b(database|db)\s*(host|user|pass|password|connection|string)\b', 0.75),
     
     # Delimiter injection — HIGH (0.90)
@@ -250,16 +262,10 @@ def sanitize_input(user_input: str) -> str:
     # Step 2: Unicode Normalization (NFKC)
     text = unicodedata.normalize('NFKC', text)
     
-    # Step 3: Leetspeak normalization (NEW)
-    # We run pattern matching on BOTH the original and leetspeak-normalized versions
-    # Store the leetspeak-normalized version for pattern matching
-    text_normalized = normalize_leetspeak(text)
-    
-    # If leetspeak normalization changed the text significantly, store both
-    if text_normalized != text.lower():
-        # Store the normalized version in session state for pattern matching
-        _set_session("leetspeak_normalized", text_normalized)
-    
+    # Step 3: Leetspeak is NOT folded into the returned text — that would corrupt
+    # legitimate prompts (version numbers, "P@ssw0rd policy", etc.) before they
+    # reach the target LLM. local_pattern_detector() derives the normalized
+    # variant itself and matches against both. See normalize_leetspeak().
     return text
 
 
@@ -267,7 +273,8 @@ def sanitize_input(user_input: str) -> str:
 # LAYER 2: DETECTION
 # =============================================================================
 
-def security_guardrail(sanitized_input: str, chat_history: list = None) -> dict:
+def security_guardrail(sanitized_input: str, chat_history: list = None,
+                       threat_score: float = None) -> dict:
     """
     LLM-based security guardrail using the "Sandwich Defense" technique.
     Acts as a judge to detect prompt injections, jailbreaks, and malicious intent.
@@ -349,14 +356,14 @@ Examples:
     except json.JSONDecodeError as e:
         _set_session("last_raw_error",
                      f"🛡️ Defense JSON Parse Error:\n{type(e).__name__}: {str(e)}")
-        return local_pattern_detector(sanitized_input)
+        return local_pattern_detector(sanitized_input, threat_score)
     except Exception as e:
         _set_session("last_raw_error",
                      f"🛡️ Defense API Error:\n{type(e).__name__}: {str(e)}")
-        return local_pattern_detector(sanitized_input)
+        return local_pattern_detector(sanitized_input, threat_score)
 
 
-def local_pattern_detector(text: str) -> dict:
+def local_pattern_detector(text: str, threat_score: float = None) -> dict:
     """
     Local rule-based fallback detector with WEIGHTED confidence scoring.
     Uses regex patterns to detect common injection attempts.
@@ -364,14 +371,20 @@ def local_pattern_detector(text: str) -> dict:
     
     Args:
         text: The sanitized user input to analyze.
+        threat_score: Session threat score used for the elevated-threat
+            confidence boost. Callers that own their own session state (the
+            FastAPI backend) pass it explicitly; when omitted we fall back to
+            st.session_state so the Streamlit app keeps working unchanged.
         
     Returns:
         Dictionary with keys: is_malicious (bool), reason (str), confidence (float)
     """
-    # Check both original and leetspeak-normalized versions
+    # Check both the original and the leetspeak-normalized variant. The variant
+    # is derived here rather than passed through session state, so obfuscated
+    # attacks are caught in every host (FastAPI, Streamlit, direct import).
     texts_to_check = [text]
-    leet_normalized = _get_session('leetspeak_normalized', None)
-    if leet_normalized and leet_normalized != text.lower():
+    leet_normalized = normalize_leetspeak(text)
+    if leet_normalized.lower() != text.lower():
         texts_to_check.append(leet_normalized)
     
     best_match = None
@@ -388,7 +401,8 @@ def local_pattern_detector(text: str) -> dict:
     if best_match:
         # Apply threat score boost if session has elevated threat level
         threat_boost = 0.0
-        threat_score = _get_session('threat_score', 0.0)
+        if threat_score is None:
+            threat_score = _get_session('threat_score', 0.0)
         if threat_score and threat_score > Config.ELEVATED_THREAT_THRESHOLD:
             threat_boost = Config.ELEVATED_THREAT_CONFIDENCE_BOOST
         
@@ -420,7 +434,8 @@ def local_pattern_detector(text: str) -> dict:
     }
 
 
-def security_guardrail_groq(sanitized_input: str, chat_history: list = None) -> dict:
+def security_guardrail_groq(sanitized_input: str, chat_history: list = None,
+                            threat_score: float = None) -> dict:
     """
     Groq-based security guardrail for test mode (free API).
     Uses Llama 3 model for fast inference.
@@ -429,7 +444,7 @@ def security_guardrail_groq(sanitized_input: str, chat_history: list = None) -> 
         chat_history = []
     
     # First, run local pattern detection (with weighted scoring)
-    local_result = local_pattern_detector(sanitized_input)
+    local_result = local_pattern_detector(sanitized_input, threat_score)
     if local_result.get("is_malicious"):
         local_result["detection_method"] = "groq_local_pattern"
         return local_result
@@ -486,14 +501,14 @@ Reply ONLY with JSON."""
     except Exception as e:
         _set_session("last_raw_error",
                      f"🧪 Groq API Error:\n{type(e).__name__}: {str(e)}")
-        return local_pattern_detector(sanitized_input)
+        return local_pattern_detector(sanitized_input, threat_score)
 
 
 # =============================================================================
 # MULTI-TURN CONVERSATION-AWARE DETECTION (NEW)
 # =============================================================================
 
-def analyze_conversation_context(messages: list) -> dict:
+def analyze_conversation_context(messages: list, threat_score: float = None) -> dict:
     """
     Detect payload-splitting attacks across multiple messages.
     Concatenates recent user messages and runs pattern detection on the combined text.
@@ -516,7 +531,7 @@ def analyze_conversation_context(messages: list) -> dict:
     combined = ' '.join(recent_user_msgs)
     
     # Run pattern detection on combined text
-    result = local_pattern_detector(combined)
+    result = local_pattern_detector(combined, threat_score)
     
     if result.get("is_malicious"):
         return {

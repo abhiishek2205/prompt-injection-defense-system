@@ -27,14 +27,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from defense import (
+    Config,
     sanitize_input,
     security_guardrail_groq,
     security_guardrail,
     reprompt_malicious,
     contain_output,
     analyze_conversation_context,
-    update_threat_score,
-    get_threat_level,
     local_pattern_detector
 )
 from target import get_target_response_groq, get_target_response
@@ -57,16 +56,86 @@ class ChatRequest(BaseModel):
     comparison_mode: bool = False
 
 class SessionState:
-    threat_score: float = 0.0
-    blocked_count: int = 0
-    safe_count: int = 0
-    reprompt_count: int = 0
-    containment_count: int = 0
-    eval_fp: int = 0
-    eval_fn: int = 0
-    eval_latencies: list = []
+    """Per-process counters for the demo.
+
+    NOTE: this is deliberately a single global — the demo UI shows one shared
+    metrics bar. Every field is set in __init__ (never as a class attribute),
+    because a class-level list would be shared across instances and would not
+    be replaced by reset().
+    """
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.threat_score = 0.0
+        self.blocked_count = 0
+        self.safe_count = 0
+        self.reprompt_count = 0
+        self.containment_count = 0
+        self.eval_fp = 0
+        self.eval_fn = 0
+        self.eval_latencies = []
+
 
 session = SessionState()
+
+
+def _update_threat_score(is_malicious: bool) -> float:
+    """Advance the session threat score using the shared Config constants."""
+    if is_malicious:
+        session.threat_score = min(Config.THREAT_SCORE_MAX,
+                                   session.threat_score + Config.THREAT_SCORE_INCREMENT)
+    else:
+        session.threat_score = max(0.0,
+                                   session.threat_score - Config.THREAT_SCORE_DECAY)
+    return session.threat_score
+
+
+def _record_ground_truth(message: str, is_malicious: bool):
+    """Score the verdict against the labeled test set, if the prompt is in it."""
+    ground_truth = get_ground_truth(message)
+    if not ground_truth.get("label"):
+        return
+    predicted = "MALICIOUS" if is_malicious else "SAFE"
+    if predicted != ground_truth["label"]:
+        if ground_truth["label"] == "SAFE":
+            session.eval_fp += 1
+        else:
+            session.eval_fn += 1
+
+
+def _detect(req, sanitized):
+    """Layer 2 for both the shielded and comparison paths.
+
+    Runs single-turn detection, then multi-turn detection over the recent
+    window so payload-splitting attacks are caught even when each individual
+    message looks benign. The threat score is passed explicitly — defense.py
+    cannot reach our session state on its own.
+    """
+    score = session.threat_score
+    try:
+        security = (security_guardrail_groq(sanitized, req.chat_history, score)
+                    if req.test_mode
+                    else security_guardrail(sanitized, req.chat_history, score))
+    except Exception:
+        security = local_pattern_detector(sanitized, score)
+
+    if not security.get("is_malicious", False):
+        history = list(req.chat_history) + [{"role": "user", "content": req.message}]
+        try:
+            multi = analyze_conversation_context(history, score)
+        except Exception:
+            multi = {"is_suspicious": False}
+        if multi.get("is_suspicious"):
+            security = {
+                "is_malicious": True,
+                "reason": multi.get("reason", "Multi-turn attack detected"),
+                "confidence": multi.get("confidence", 0.75),
+                "detection_method": "multi_turn",
+            }
+    return security
+
 
 @app.get("/metrics")
 def get_metrics():
@@ -93,14 +162,7 @@ def get_threat_level_local(score):
 
 @app.post("/reset")
 def reset_session():
-    session.threat_score = 0.0
-    session.blocked_count = 0
-    session.safe_count = 0
-    session.reprompt_count = 0
-    session.containment_count = 0
-    session.eval_fp = 0
-    session.eval_fn = 0
-    session.eval_latencies = []
+    session.reset()
     return {"status": "reset"}
 
 @app.post("/chat")
@@ -121,14 +183,11 @@ async def chat(req: ChatRequest):
 
         # 2) Shielded path — full defense pipeline
         sanitized = sanitize_input(req.message)
-        try:
-            security = (security_guardrail_groq(sanitized, req.chat_history)
-                       if req.test_mode
-                       else security_guardrail(sanitized, req.chat_history))
-        except Exception:
-            security = local_pattern_detector(sanitized)
+        security = _detect(req, sanitized)
 
         is_malicious = security.get("is_malicious", False)
+        _update_threat_score(is_malicious)
+        _record_ground_truth(req.message, is_malicious)
         shielded_type = "safe"
         shielded_response = ""
         shielded_pipeline = {"sanitize": "pass", "detect": "pass",
@@ -156,10 +215,15 @@ async def chat(req: ChatRequest):
                 contained = contain_output(shielded_response)
                 shielded_pipeline["contain"] = "warn" if contained["is_leaked"] else "pass"
                 shielded_response = contained["filtered_response"]
+                if contained["is_leaked"]:
+                    session.containment_count += 1
+                session.reprompt_count += 1
+                session.safe_count += 1
             else:
                 shielded_type = "blocked"
                 shielded_pipeline["reprompt"] = "fail"
                 shielded_pipeline["contain"] = "skip"
+                session.blocked_count += 1
         else:
             try:
                 shielded_response = (get_target_response_groq(sanitized)
@@ -170,6 +234,9 @@ async def chat(req: ChatRequest):
             contained = contain_output(shielded_response)
             shielded_pipeline["contain"] = "warn" if contained["is_leaked"] else "pass"
             shielded_response = contained["filtered_response"]
+            if contained["is_leaked"]:
+                session.containment_count += 1
+            session.safe_count += 1
 
         elapsed = (time.time() - start) * 1000
         session.eval_latencies.append(elapsed)
@@ -198,6 +265,7 @@ async def chat(req: ChatRequest):
         except Exception as e:
             response = f"Error: {str(e)}"
         session.safe_count += 1
+        session.eval_latencies.append((time.time() - start) * 1000)
         return {
             "type": "unshielded",
             "response": response,
@@ -209,34 +277,15 @@ async def chat(req: ChatRequest):
     # LAYER 1: Sanitize
     sanitized = sanitize_input(req.message)
 
-    # LAYER 2: Detect
-    try:
-        security = (security_guardrail_groq(sanitized, req.chat_history)
-                   if req.test_mode
-                   else security_guardrail(sanitized, req.chat_history))
-    except Exception:
-        security = local_pattern_detector(sanitized)
-
-    elapsed = (time.time() - start) * 1000
-    session.eval_latencies.append(elapsed)
+    # LAYER 2: Detect (single-turn + multi-turn, threat score applied)
+    # _detect() reads the threat score from before this message, so the
+    # elevated-threat boost reflects the session's prior history; the score is
+    # advanced afterwards.
+    security = _detect(req, sanitized)
 
     is_malicious = security.get("is_malicious", False)
-
-    # Update threat score manually
-    if is_malicious:
-        session.threat_score = min(1.0, session.threat_score + 0.3)
-    else:
-        session.threat_score = max(0.0, session.threat_score - 0.05)
-
-    # Ground truth eval
-    ground_truth = get_ground_truth(req.message)
-    predicted = "MALICIOUS" if is_malicious else "SAFE"
-    if ground_truth.get("label"):
-        if predicted != ground_truth["label"]:
-            if ground_truth["label"] == "SAFE":
-                session.eval_fp += 1
-            else:
-                session.eval_fn += 1
+    _update_threat_score(is_malicious)
+    _record_ground_truth(req.message, is_malicious)
 
     pipeline = {"sanitize": "pass", "detect": "pass",
                 "reprompt": "skip", "contain": "skip"}
@@ -267,6 +316,7 @@ async def chat(req: ChatRequest):
 
             session.safe_count += 1
             session.reprompt_count += 1
+            session.eval_latencies.append((time.time() - start) * 1000)
             return {
                 "type": "reprompted",
                 "response": contained["filtered_response"],
@@ -281,6 +331,7 @@ async def chat(req: ChatRequest):
             pipeline["reprompt"] = "fail"
             pipeline["contain"] = "skip"
             session.blocked_count += 1
+            session.eval_latencies.append((time.time() - start) * 1000)
             return {
                 "type": "blocked",
                 "response": "",
@@ -305,6 +356,7 @@ async def chat(req: ChatRequest):
         session.containment_count += 1
 
     session.safe_count += 1
+    session.eval_latencies.append((time.time() - start) * 1000)
     return {
         "type": "safe",
         "response": contained["filtered_response"],
