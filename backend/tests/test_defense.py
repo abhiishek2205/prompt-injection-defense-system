@@ -179,7 +179,19 @@ def test_local_detector_has_no_false_positives():
 
 
 def test_local_detector_accuracy_floor():
-    """Ratchet. Raise this number when coverage improves; never lower it."""
+    """Ratchet. Raise this number when coverage improves; never lower it.
+
+    At 116/116 this corpus is saturated, which means it has stopped being
+    evidence of anything on its own — the patterns were written against it.
+    tests/test_generalization.py is the real check from here on; new patterns
+    should be judged there, not by this number.
+    """
     correct, fp, fn = _benchmark()
-    assert correct >= 82, (
+    assert correct >= 116, (
         f"local accuracy regressed to {correct}/{len(TEST_CASES)} (FP={fp}, FN={fn})")
+
+
+def test_local_detector_has_no_false_negatives():
+    """Companion to the FP rule: every labeled attack is caught locally."""
+    _, _, fn = _benchmark()
+    assert fn == 0, f"{fn} false negative(s) against the labeled set"
