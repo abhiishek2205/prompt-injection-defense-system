@@ -29,7 +29,7 @@ User Input
 │
 ▼
 ┌─────────────────────────────┐
-│  LAYER 2 — Detection        │  30+ weighted regex patterns +
+│  LAYER 2 — Detection        │  69 weighted regex patterns +
 │                             │  Groq LLM sandwich defense
 └─────────────────────────────┘
 │
@@ -59,8 +59,8 @@ User Output
 
 ### Prerequisites
 
-- Python 3.9+
-- Node.js 18+
+- Python 3.9+ (`backend/runtime.txt` pins 3.11 for deployment)
+- Node.js 20+ (`frontend/.nvmrc` pins 24 for deployment)
 - Groq API key (free) → https://console.groq.com/keys
 - Gemini API key (optional, for production mode) → https://aistudio.google.com/apikey
 
@@ -69,7 +69,7 @@ User Output
 ### Step 1 — Clone and navigate
 ```bash
 git clone https://github.com/abhiishek2205/prompt-injection-defense-system.git
-cd prompt-injection-defense-system/svnit_ps1
+cd prompt-injection-defense-system
 ```
 
 ---
@@ -94,22 +94,24 @@ GROQ_API_KEY = "your-groq-api-key-here"
 ---
 
 ### Step 3 — Install backend dependencies
+
+From the repository root:
 ```bash
 cd backend
-pip install fastapi uvicorn toml google-generativeai groq streamlit
+pip install -r requirements.txt
 ```
 
-Or using the requirements file:
+To run the test suite as well:
 ```bash
-pip install -r requirements_api.txt
+pip install -r requirements.txt -r requirements-dev.txt
 ```
 
 ---
 
 ### Step 4 — Start the backend server
+
+Still inside `backend/`:
 ```bash
-# Make sure you are inside the backend/ folder
-cd backend
 python -m uvicorn api:app --reload --port 8000
 ```
 
@@ -124,9 +126,9 @@ You should see the Swagger API documentation.
 
 ### Step 5 — Install frontend dependencies
 
-Open a **new terminal** (keep the backend running):
+Open a **new terminal** (keep the backend running), from the repository root:
 ```bash
-cd svnit_ps1/frontend
+cd frontend
 npm install
 ```
 
@@ -200,26 +202,35 @@ Defense strips the attack and answers only the legitimate VPN question.
 
 ## 📁 Project Structure
 ```text
-svnit_ps1/
+prompt-injection-defense-system/
 ├── backend/
-│   ├── api.py              # FastAPI server — REST endpoints
-│   ├── defense.py          # 4-layer defense module (863 lines)
-│   ├── target.py           # Vulnerable honeypot LLM (NexusCore)
-│   ├── evaluation.py       # 116 labeled test cases + benchmark runner
-│   ├── app.py              # Original Streamlit UI (legacy)
-│   ├── requirements.txt    # Streamlit dependencies
-│   ├── requirements_api.txt # FastAPI dependencies
+│   ├── api.py                   # FastAPI server — REST endpoints
+│   ├── defense.py               # 4-layer defense module
+│   ├── target.py                # Vulnerable honeypot LLM (NexusCore)
+│   ├── evaluation.py            # 116 labeled test cases + benchmark runner
+│   ├── app.py                   # Original Streamlit UI (legacy)
+│   ├── requirements.txt         # Runtime dependencies
+│   ├── requirements-dev.txt     # Test-only dependencies
+│   ├── pytest.ini               # Test configuration
+│   ├── runtime.txt              # Python version for deployment
+│   ├── Procfile / railway.json  # Railway deployment config
+│   ├── tests/
+│   │   ├── test_defense.py        # Detector behaviour vs. the labeled set
+│   │   ├── test_generalization.py # Held-out prompts (the meaningful check)
+│   │   └── test_api.py            # Session/metrics bookkeeping
 │   └── .streamlit/
 │       ├── secrets.toml         # Your API keys (never commit this)
 │       └── secrets.toml.example # Template — copy and fill in
 │
 └── frontend/
     ├── src/
-    │   ├── App.jsx         # Main React dashboard (785 lines)
-    │   └── main.jsx        # React entry point
+    │   ├── App.jsx              # Main React dashboard
+    │   └── main.jsx             # React entry point
     ├── index.html
     ├── package.json
-    └── vite.config.js
+    ├── vite.config.js
+    ├── .nvmrc                   # Node version for deployment
+    └── .env.production          # Public API URL for the production build
 ```
 
 ---
@@ -227,12 +238,19 @@ svnit_ps1/
 ## 🔐 Defense Mechanisms
 
 ### Layer 1 — Input Sanitization
-- **Base64 decoding**: Catches encoded payloads like `SWdub3JlIHJ1bGVz`
+- **Base64 decoding**: Catches encoded payloads —
+  `SWdub3JlIGFsbCBwcmV2aW91cyBpbnN0cnVjdGlvbnM=` → `Ignore all previous instructions`.
+  The whole message must be valid Base64 and at least 20 characters
+  (`Config.MIN_BASE64_LENGTH`), so short strings are left alone.
 - **Unicode normalization** (NFKC): Converts homoglyphs `Ïgnörë` → `Ignore`
 - **Leetspeak normalization**: Converts `1gn0r3` → `ignore`
+- **Separator collapsing**: Converts `S.Y.S.T.E.M O.V.E.R.R.I.D.E` → `SYSTEM OVERRIDE`
+
+Normalized variants are used for pattern matching only — the target LLM always
+receives the original text, so legitimate prompts are never corrupted.
 
 ### Layer 2 — Detection (Dual Engine)
-- **Local pattern detector**: 30+ weighted regex patterns (0.60–0.95 confidence scores). Fires instantly with no API call.
+- **Local pattern detector**: 69 weighted regex patterns (0.65–0.95 confidence scores), matched against the raw input and its de-obfuscated variants. Fires instantly with no API call (~0.15 ms per prompt).
 - **Sandwich defense**: Wraps user input in XML tags with hardened top+bottom instructions. Sends to Groq Llama-3.3-70B for semantic analysis.
 - **Threat scoring**: Session-level score increments on each attack, decays on safe messages. Boosts confidence for repeat offenders.
 - **Multi-turn detection**: Concatenates last 3 messages to catch payload-splitting attacks.
@@ -273,6 +291,31 @@ in the top bar as you test prompts.
 
 ---
 
+## 🧪 Tests
+
+Regression suite for the defense layers and the metrics bookkeeping. Runs
+fully offline — no API keys, no network calls (the target LLM and the LLM
+guardrail are stubbed).
+
+```bash
+cd backend
+pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest
+```
+
+`tests/test_defense.py` pins the local detector's behaviour against the
+labeled set in `evaluation.py`, including a hard **zero false positives**
+rule — a local false positive short-circuits the LLM guardrail
+(`security_guardrail_groq` returns on the first local match), so it cannot be
+recovered at runtime — and an accuracy floor that should be raised, never
+lowered, as coverage improves.
+
+`tests/test_api.py` covers session/counter accounting: every `/chat` path
+records exactly one latency sample, comparison mode moves the same counters
+as the normal path, and `SessionState` fields are per-instance.
+
+---
+
 ## 🔌 API Reference
 
 ### POST /chat
@@ -298,7 +341,8 @@ Main chat endpoint.
     "is_malicious": true,
     "reason": "Detected injection pattern: 'ignore all previous instructions'",
     "confidence": 0.95,
-    "detection_method": "groq_local_pattern"
+    "detection_method": "groq_local_pattern",
+    "pattern_weight": 0.95
   },
   "pipeline": {
     "sanitize": "pass",
@@ -312,6 +356,24 @@ Main chat endpoint.
 
 ### GET /metrics
 Returns current session statistics.
+
+```json
+{
+  "blocked": 1,
+  "safe": 0,
+  "reprompted": 0,
+  "contained": 0,
+  "false_positives": 0,
+  "false_negatives": 0,
+  "avg_latency": 12.4,
+  "threat_score": 0.3,
+  "threat_level": "GUARDED",
+  "total_queries": 1
+}
+```
+
+`total_queries` counts every `/chat` request, on all paths, and is the
+denominator for `avg_latency`.
 
 ### POST /reset
 Resets all session counters and chat history.
@@ -328,8 +390,16 @@ Resets all session counters and chat history.
 | Cost | Free | Pay per use |
 | Speed | ~500ms | ~1200ms |
 | Accuracy | High | Higher |
+| SDK | `groq` | `google-genai` |
 
 Toggle using the "Test Mode" switch in the sidebar footer.
+
+Only the mode you use needs a key — the backend starts with either key alone,
+or with neither. The Gemini client is built on first use (`google-genai` raises
+if constructed without a key), so production mode costs nothing until you
+select it. If a key is missing or an API call fails, detection degrades to the
+local pattern detector rather than erroring out, and the response reports
+`detection_method: "local_pattern"`.
 
 ---
 
@@ -349,17 +419,21 @@ lsof -i :8000
 
 **"Could not import module api" error:**
 ```bash
-# Make sure you are in the backend/ folder, not the parent folder
-cd svnit_ps1/backend
+# Make sure you are in the backend/ folder, not the repository root
+cd backend
 python -m uvicorn api:app --reload --port 8000
 ```
 
 **Frontend shows blank/error:**
 ```bash
-# Make sure backend is running first on port 8000
-# Then check browser console for CORS errors
-# Verify vite.config.js has proxy configured to localhost:8000
+# Make sure the backend is running first on port 8000
+# Then check the browser console for CORS or connection errors
 ```
+
+The frontend calls the API directly at `VITE_API_URL` (see `frontend/src/App.jsx`),
+defaulting to `http://localhost:8000` when that variable is unset — it does not
+go through the `/api` proxy defined in `vite.config.js`. To point the dev server
+at a different backend, set `VITE_API_URL` rather than editing the proxy.
 
 **API keys not working:**
 ```bash
