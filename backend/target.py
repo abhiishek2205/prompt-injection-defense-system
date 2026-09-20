@@ -14,12 +14,29 @@ def _set_session(key, value):
     except Exception:
         pass
 
-import google.generativeai as genai
+from google import genai
 from groq import Groq
 
-genai.configure(api_key=_get_secret("GEMINI_API_KEY"))
 groq_client = Groq(api_key=_get_secret("GROQ_API_KEY"))
-model = genai.GenerativeModel("gemini-2.5-flash-lite")
+
+GEMINI_MODEL = "gemini-2.5-flash-lite"
+
+# Built lazily: google.genai raises from the Client constructor when no API key
+# is set, where the old SDK's genai.configure() accepted an empty one. The Groq
+# path and the hardcoded honeypot responses do not need a Gemini key, so this
+# module has to stay importable without one.
+_gemini_client = None
+
+
+def get_gemini_client():
+    """Return the shared Gemini client, building it on first use."""
+    global _gemini_client
+    if _gemini_client is None:
+        api_key = _get_secret("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY is not set — production mode is unavailable.")
+        _gemini_client = genai.Client(api_key=api_key)
+    return _gemini_client
 
 # Fake internal data — ALL COMPLETELY FAKE for demo only
 INTERNAL_DATA = {
@@ -314,11 +331,11 @@ def get_target_response(user_prompt: str) -> str:
     
     # Safe prompt — call Gemini normally
     try:
-        response = model.generate_content([
-            {"role": "user", "parts": [VULNERABLE_SYSTEM_PROMPT]},
-            {"role": "model", "parts": ["Understood. I will help with internal queries."]},
-            {"role": "user", "parts": [user_prompt]}
-        ])
+        response = get_gemini_client().models.generate_content(
+            model=GEMINI_MODEL,
+            contents=user_prompt,
+            config={"system_instruction": VULNERABLE_SYSTEM_PROMPT},
+        )
         return response.text
     except Exception as e:
         _set_session("last_raw_error", f"Gemini Target Error: {str(e)}")

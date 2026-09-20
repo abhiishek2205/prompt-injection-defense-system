@@ -390,8 +390,16 @@ Resets all session counters and chat history.
 | Cost | Free | Pay per use |
 | Speed | ~500ms | ~1200ms |
 | Accuracy | High | Higher |
+| SDK | `groq` | `google-genai` |
 
 Toggle using the "Test Mode" switch in the sidebar footer.
+
+Only the mode you use needs a key — the backend starts with either key alone,
+or with neither. The Gemini client is built on first use (`google-genai` raises
+if constructed without a key), so production mode costs nothing until you
+select it. If a key is missing or an API call fails, detection degrades to the
+local pattern detector rather than erroring out, and the response reports
+`detection_method: "local_pattern"`.
 
 ---
 
