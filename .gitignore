@@ -7,6 +7,7 @@ __pycache__/
 .venv/
 venv/
 ENV/
+.pytest_cache/
 
 # IDE
 .vscode/
@@ -18,13 +19,16 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Deployment & Secrets
+# Secrets
+# Scoped to the actual secret files — a blanket *.toml would also swallow
+# pyproject.toml, railway config and anything else the project needs tracked.
 .streamlit/secrets.toml
 backend/.streamlit/secrets.toml
-*.toml
 .env
-.env.production
+.env.local
 .env.development
+# NOTE: frontend/.env.production is intentionally tracked — it holds only the
+# public API URL that the Vercel build needs, not a secret.
 
 # Frontend
 node_modules/
