@@ -36,9 +36,18 @@ evaluation.py's TEST_CASES and the held-out prompts in
 tests/test_generalization.py are held out permanently. This script refuses to
 run if any training row appears in either, and reports against them at the end.
 
+LOCAL DATASET FILES
+-------------------
+Anything dropped into data/external/ is picked up automatically: .csv, .tsv,
+.jsonl, .json or .parquet. Text and label columns are detected by name, so
+downloaded files work as they come; a file whose columns are not recognised is
+reported with its actual column names and skipped. This is the route to use
+when huggingface.co is unreachable — download once, commit, train offline.
+
 Usage:
-    python train_detector.py                # seed corpus
-    python train_detector.py --hf           # add public datasets if reachable
+    python train_detector.py                # seed corpus + data/external/
+    python train_detector.py --hf           # also try Hugging Face directly
+    python train_detector.py --no-seed      # data/external/ only
     python train_detector.py --out models/detector.joblib
 """
 
@@ -61,6 +70,23 @@ from sklearn.pipeline import FeatureUnion, Pipeline
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SEED_CORPUS = os.path.join(HERE, "data", "seed_corpus.jsonl")
+EXTERNAL_DIR = os.path.join(HERE, "data", "external")
+
+# Column names seen across public prompt-injection datasets. The loader picks
+# the first match rather than making you rename columns, because every set
+# names these differently.
+TEXT_COLUMNS = ["text", "prompt", "input", "sentence", "content", "message",
+                "query", "instruction", "user_input", "question"]
+LABEL_COLUMNS = ["label", "labels", "type", "class", "category", "target", "y",
+                 "is_injection", "injection", "jailbreak", "malicious",
+                 "is_malicious", "toxic", "attack"]
+
+# Label values that mean "attack". Anything else counts as benign, so an
+# unfamiliar value fails safe (a mislabelled attack costs recall; a mislabelled
+# benign would cost precision, which is the thing this project protects).
+MALICIOUS_VALUES = {"1", "true", "yes", "jailbreak", "injection", "malicious",
+                    "attack", "prompt_injection", "unsafe", "harmful", "bad",
+                    "positive", "spam"}
 DEFAULT_OUT = os.path.join(HERE, "models", "detector.joblib")
 RANDOM_STATE = 20260921
 
@@ -144,6 +170,113 @@ def load_hf():
                   f"(columns: {columns or 'unknown'})")
         else:
             print(f"  {repo}: {added} rows")
+    return rows
+
+
+def _read_table(path):
+    """Read one dataset file into a DataFrame. Returns None if unsupported."""
+    import pandas as pd
+
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".csv":
+        return pd.read_csv(path)
+    if ext in (".tsv", ".tab"):
+        return pd.read_csv(path, sep="\t")
+    if ext == ".jsonl":
+        return pd.read_json(path, lines=True)
+    if ext == ".json":
+        return pd.read_json(path)
+    if ext == ".parquet":
+        return pd.read_parquet(path)
+    return None
+
+
+def _pick(columns, candidates):
+    lowered = {str(c).lower(): c for c in columns}
+    for name in candidates:
+        if name in lowered:
+            return lowered[name]
+    return None
+
+
+def _to_label(value):
+    """Map a dataset's label value onto 0/1, or None if it is unusable."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        if value != value:  # NaN
+            return None
+        return 1 if float(value) >= 0.5 else 0
+    return 1 if str(value).strip().lower() in MALICIOUS_VALUES else 0
+
+
+def load_local():
+    """Load every dataset file dropped into data/external/.
+
+    Formats: .csv .tsv .jsonl .json .parquet. Text and label columns are
+    detected by name, so downloaded files can be used as they come. Files that
+    cannot be understood are reported and skipped, never fatal.
+    """
+    if not os.path.isdir(EXTERNAL_DIR):
+        return []
+
+    paths = sorted(
+        os.path.join(EXTERNAL_DIR, name)
+        for name in os.listdir(EXTERNAL_DIR)
+        if not name.startswith(".") and name.lower().endswith(
+            (".csv", ".tsv", ".tab", ".jsonl", ".json", ".parquet"))
+    )
+    if not paths:
+        print(f"  data/external/: no dataset files found")
+        return []
+
+    rows = []
+    for path in paths:
+        name = os.path.basename(path)
+        try:
+            frame = _read_table(path)
+        except Exception as exc:
+            print(f"  {name}: unreadable ({type(exc).__name__}: {exc}) — skipped")
+            continue
+        if frame is None or frame.empty:
+            print(f"  {name}: empty — skipped")
+            continue
+
+        columns = list(frame.columns)
+        text_col = _pick(columns, TEXT_COLUMNS)
+        label_col = _pick(columns, LABEL_COLUMNS)
+        if text_col is None or label_col is None:
+            missing = "text" if text_col is None else "label"
+            print(f"  {name}: no {missing} column recognised. Columns are "
+                  f"{columns}.\n      Rename one, or add it to "
+                  f"{'TEXT_COLUMNS' if text_col is None else 'LABEL_COLUMNS'} "
+                  f"in train_detector.py — skipped")
+            continue
+
+        added = skipped = 0
+        for text, raw in zip(frame[text_col], frame[label_col]):
+            if not isinstance(text, str) or not text.strip():
+                skipped += 1
+                continue
+            label = _to_label(raw)
+            if label is None:
+                skipped += 1
+                continue
+            rows.append({"text": text.strip(), "label": label,
+                         "source": f"external/{name}"})
+            added += 1
+
+        distinct = sorted({str(v) for v in frame[label_col].head(200)})[:6]
+        n_mal = sum(1 for r in rows[-added:] if r["label"] == 1) if added else 0
+        print(f"  {name}: {added} rows "
+              f"({n_mal} malicious, {added - n_mal} benign) "
+              f"via {text_col!r}/{label_col!r}"
+              + (f", {skipped} skipped" if skipped else ""))
+        if added and (n_mal == 0 or n_mal == added):
+            print(f"      ! single-class file — label values seen: {distinct}")
+            print(f"        check MALICIOUS_VALUES covers this set's vocabulary")
     return rows
 
 
@@ -249,12 +382,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hf", action="store_true",
                     help="also pull public datasets from Hugging Face")
+    ap.add_argument("--no-seed", action="store_true",
+                    help="skip the bundled seed corpus and train on "
+                         "data/external/ alone")
     ap.add_argument("--out", default=DEFAULT_OUT)
     args = ap.parse_args()
 
     print("Loading data")
-    rows = load_seed()
-    print(f"  seed corpus: {len(rows)} rows")
+    rows = []
+    if not args.no_seed:
+        rows += load_seed()
+        print(f"  seed corpus: {len(rows)} rows")
+    rows += load_local()
     if args.hf:
         rows += load_hf()
 
@@ -325,9 +464,14 @@ def main():
 
     size_mb = os.path.getsize(args.out) / 1e6
     print(f"\nSaved {args.out} ({size_mb:.2f} MB)")
-    if not args.hf:
-        print("Trained on the seed corpus alone. Re-run with --hf and real public "
-              "data before quoting these numbers anywhere.")
+    external = sorted({r["source"] for r in rows if r["source"].startswith("external/")})
+    if not external and not args.hf:
+        print("Trained on the seed corpus alone — a generated scaffold. Drop real "
+              "datasets into data/external/ and re-run before quoting these "
+              "numbers anywhere.")
+    elif external:
+        print(f"Included {len(external)} external dataset file(s): "
+              + ", ".join(os.path.basename(s) for s in external))
 
 
 if __name__ == "__main__":
