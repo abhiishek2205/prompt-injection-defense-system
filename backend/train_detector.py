@@ -64,7 +64,13 @@ SEED_CORPUS = os.path.join(HERE, "data", "seed_corpus.jsonl")
 DEFAULT_OUT = os.path.join(HERE, "models", "detector.joblib")
 RANDOM_STATE = 20260921
 
-# Public datasets to try under --hf: (repo id, text column, label column)
+# Public datasets to try under --hf: (repo id, text column, label column).
+#
+# UNVERIFIED: these repo IDs and column names come from dataset listings, not
+# from a live download — huggingface.co was unreachable when this was written.
+# Expect to correct a column name or two on first run; load_hf() prints the
+# actual columns when they do not match, and a bad entry is skipped rather
+# than fatal. Check each licence before using one in a submission.
 HF_DATASETS = [
     ("qualifire/prompt-injections-benchmark", "text", "label"),
     ("jackhhao/jailbreak-classification", "prompt", "type"),
@@ -108,6 +114,17 @@ def load_hf():
             print(f"  {repo}: unavailable ({type(exc).__name__}) — skipped")
             continue
 
+        columns = list(getattr(ds, "column_names", []) or [])
+        if columns and (text_col not in columns or label_col not in columns):
+            # The repo IDs and column names below were taken from dataset
+            # listings, not verified against a live download. Schemas drift and
+            # get renamed, so say so loudly instead of skipping every row and
+            # reporting an empty result.
+            print(f"  {repo}: expected columns "
+                  f"{text_col!r}/{label_col!r} but found {columns} — skipped."
+                  f"\n      Fix the entry in HF_DATASETS and re-run.")
+            continue
+
         added = 0
         for item in ds:
             text = item.get(text_col)
@@ -122,7 +139,11 @@ def load_hf():
                 label = int(bool(raw))
             rows.append({"text": text, "label": label, "source": repo})
             added += 1
-        print(f"  {repo}: {added} rows")
+        if added == 0:
+            print(f"  {repo}: loaded but produced 0 usable rows "
+                  f"(columns: {columns or 'unknown'})")
+        else:
+            print(f"  {repo}: {added} rows")
     return rows
 
 
