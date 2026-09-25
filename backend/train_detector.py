@@ -334,6 +334,34 @@ def prepare(rows, forbidden, reserved=frozenset()):
     return clean
 
 
+def collect_rows(no_seed=False, no_hard_negatives=False):
+    """Every training row, deduplicated and with all held-out prompts removed.
+
+    Returns (rows, external_eval). Shared by train_detector.py and
+    train_transformer.py so both models see exactly the same data.
+    """
+    print("Loading data")
+    rows = []
+    if not no_seed:
+        rows += load_seed()
+        print(f"  seed corpus: {len(rows)} rows")
+    if not no_hard_negatives and os.path.exists(HARD_NEGATIVES):
+        hard = load_seed(HARD_NEGATIVES)
+        rows += hard
+        print(f"  generated hard negatives: {len(hard)} rows "
+              f"(build_hard_negatives.py)")
+    rows += load_local()
+
+    forbidden = held_out_texts()
+    print(f"  held-out prompts protected: {len(forbidden)}")
+    external_eval = load_eval()
+    reserved = {_normalize(t) for texts, _ in external_eval.values() for t in texts}
+    if external_eval:
+        print(f"  external evaluation sets: {len(external_eval)} "
+              f"({len(reserved)} distinct prompts reserved)")
+    return prepare(rows, forbidden, reserved), external_eval
+
+
 # =============================================================================
 # Model
 # =============================================================================
@@ -509,6 +537,41 @@ def _report_header():
           f"{'ML':<25}  |  {'regex':<25}  |  {'regex + ML':<25}")
 
 
+def report_all(model, threshold, external_eval):
+    """Score every held-out and external evaluation set. Never trained on;
+    this is the only honest read. Returns {"held_out": ..., "external": ...}."""
+    import evaluation
+
+    print("\nHeld-out (never trained on)")
+    _report_header()
+    metrics = {"held_out": {}}
+    metrics["held_out"]["evaluation.py"] = report_against(
+        model, threshold, "evaluation.py TEST_CASES",
+        [c["prompt"] for c in evaluation.TEST_CASES],
+        [1 if c["label"] == "MALICIOUS" else 0 for c in evaluation.TEST_CASES])
+
+    try:
+        sys.path.insert(0, os.path.join(HERE, "tests"))
+        import test_generalization as tg
+        metrics["held_out"]["safe_holdout"] = report_against(
+            model, threshold, "test_generalization SAFE",
+            list(tg.SAFE_HOLDOUT), [0] * len(tg.SAFE_HOLDOUT))
+        metrics["held_out"]["malicious_holdout"] = report_against(
+            model, threshold, "test_generalization MALICIOUS",
+            list(tg.MALICIOUS_HOLDOUT), [1] * len(tg.MALICIOUS_HOLDOUT))
+    except Exception as exc:
+        print(f"  ! held-out generalization set unavailable ({type(exc).__name__})")
+
+    if external_eval:
+        print("\nExternal evaluation sets (other datasets' test splits)")
+        _report_header()
+        metrics["external"] = {}
+        for name, (eval_texts, eval_labels) in external_eval.items():
+            metrics["external"][name] = report_against(
+                model, threshold, name, eval_texts, eval_labels)
+    return metrics
+
+
 # =============================================================================
 
 def main():
@@ -534,26 +597,8 @@ def main():
         fetch_datasets.fetch_all()
         print()
 
-    print("Loading data")
-    rows = []
-    if not args.no_seed:
-        rows += load_seed()
-        print(f"  seed corpus: {len(rows)} rows")
-    if not args.no_hard_negatives and os.path.exists(HARD_NEGATIVES):
-        hard = load_seed(HARD_NEGATIVES)
-        rows += hard
-        print(f"  generated hard negatives: {len(hard)} rows "
-              f"(build_hard_negatives.py)")
-    rows += load_local()
-
-    forbidden = held_out_texts()
-    print(f"  held-out prompts protected: {len(forbidden)}")
-    external_eval = load_eval()
-    reserved = {_normalize(t) for texts, _ in external_eval.values() for t in texts}
-    if external_eval:
-        print(f"  external evaluation sets: {len(external_eval)} "
-              f"({len(reserved)} distinct prompts reserved)")
-    rows = prepare(rows, forbidden, reserved)
+    rows, external_eval = collect_rows(no_seed=args.no_seed,
+                                       no_hard_negatives=args.no_hard_negatives)
 
     texts = [r["text"] for r in rows]
     labels = [r["label"] for r in rows]
@@ -613,38 +658,10 @@ def main():
     pipe.fit(texts, labels)
     print(f"  fit in {time.perf_counter() - started:.2f}s")
 
-    # Held-out sets. Never trained on; this is the only honest read.
-    print("\nHeld-out (never trained on)")
-    _report_header()
-    import evaluation
     metrics = {"threshold": threshold, "threshold_detail": detail,
                "cv": {"auc": float(roc_auc_score(labels, oof)),
-                      "overall": overall, "per_source": cv_report},
-               "held_out": {}}
-    metrics["held_out"]["evaluation.py"] = report_against(
-        pipe, threshold, "evaluation.py TEST_CASES",
-        [c["prompt"] for c in evaluation.TEST_CASES],
-        [1 if c["label"] == "MALICIOUS" else 0 for c in evaluation.TEST_CASES])
-
-    try:
-        sys.path.insert(0, os.path.join(HERE, "tests"))
-        import test_generalization as tg
-        metrics["held_out"]["safe_holdout"] = report_against(
-            pipe, threshold, "test_generalization SAFE",
-            list(tg.SAFE_HOLDOUT), [0] * len(tg.SAFE_HOLDOUT))
-        metrics["held_out"]["malicious_holdout"] = report_against(
-            pipe, threshold, "test_generalization MALICIOUS",
-            list(tg.MALICIOUS_HOLDOUT), [1] * len(tg.MALICIOUS_HOLDOUT))
-    except Exception as exc:
-        print(f"  ! held-out generalization set unavailable ({type(exc).__name__})")
-
-    if external_eval:
-        print("\nExternal evaluation sets (other datasets' test splits)")
-        _report_header()
-        metrics["external"] = {}
-        for name, (eval_texts, eval_labels) in external_eval.items():
-            metrics["external"][name] = report_against(
-                pipe, threshold, name, eval_texts, eval_labels)
+                      "overall": overall, "per_source": cv_report}}
+    metrics.update(report_all(pipe, threshold, external_eval))
 
     sample = ["How should we store API keys securely?"] * 200
     started = time.perf_counter()

@@ -23,6 +23,12 @@ Considered and left out — reasons in `fetch_datasets.py`:
 `reshabhs/SPML_Chatbot_Prompt_Injection` (labels do not mean "injection"),
 `xTRam1/safe-guard-prompt-injection` (no licence).
 
+## Base model
+
+| Model | Licence | Revision | Use |
+|-------|---------|----------|-----|
+| [sentence-transformers/all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) | Apache-2.0 | `1110a24` | fine-tuned by `train_transformer.py`; the result ships as `models/transformer/minilm-l6-ft/` |
+
 ## Committed to this folder by hand
 
 | File | Dataset | URL | Licence | Rows | Added |

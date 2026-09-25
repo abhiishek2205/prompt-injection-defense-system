@@ -1,41 +1,42 @@
-"""Stage 1 ML detector — a trained classifier beside the regex rules.
+"""ML detector — a trained classifier beside the regex rules.
 
 WHERE IT SITS
 -------------
 Layer 2 runs three tiers, cheapest first:
 
-    regex (0.15 ms)  ->  ML classifier (~0.06 ms)  ->  LLM guardrail (~500 ms)
+    regex (0.15 ms)  ->  ML classifier (~4 ms)  ->  LLM guardrail (~500 ms)
 
 The regex layer keeps its job because it is explainable: it names the pattern
 that matched, which is what the dashboard shows and what anyone reviewing a
 block actually needs. The classifier adds coverage for phrasings nobody wrote a
 rule for. The LLM is the expensive opinion of last resort.
 
+WHAT IS LOADED
+--------------
+models/detector.joblib holds a "pipeline" with predict_proba() and a
+"threshold". The shipped one (train_transformer.py) averages a fine-tuned
+MiniLM-L6 run through ONNX Runtime (transformer_classifier.py, model files in
+models/transformer/) with a TF-IDF model. train_detector.py writes a TF-IDF-only
+bundle in the same format. Either way this module is unchanged.
+
 WHY IT DOES NOT BLOCK YET
 -------------------------
 Config.ML_DETECTOR_CAN_BLOCK is False.
 
-The first model, trained on the generated seed corpus alone, raised 8 false
-positives on the project's 67 held-out safe prompts — the trigger-word bias
-InjecGuard (arXiv:2410.22770) measures. The model shipped now is trained on
-~32k rows of public data (fetch_datasets.py) and has none: zero false
-positives on every project safe set, so it passes the gate in
-tests/test_ml_detector.py.
+The model passes the gate in tests/test_ml_detector.py — zero false positives
+on every project safe set with blocking on. It stays advisory because
+precision off the project's own sets is not good enough for a verdict nobody
+reviews: 5.9% false positives on NotInject (benign prompts built around
+trigger words) and 4.7% on PromptShield's test split.
 
-It stays advisory because precision off the project's own sets is not yet
-good enough for a verdict nobody reviews: 2.1% false positives on NotInject
-(benign prompts built around trigger words) and 3.6% on PromptShield's test
-split. Recall is also modest — 55% on evaluation.py, where regex already
-catches everything — so today blocking would add little and risk a lot.
-
-The threshold comes from repeated, grouped out-of-fold scores on the training
-data: at most 0.5% false positives in every source, and none on the in-domain
-benign rows. See train_detector.choose_threshold().
+The threshold comes from a held-back calibration split: at most 0.5% false
+positives in every source, and none on the in-domain benign rows. See
+train_detector.choose_threshold().
 
 TO TURN BLOCKING ON
 -------------------
-1. Improve the model (hard negatives, a stronger model) and retrain:
-   `python fetch_datasets.py && python train_detector.py`.
+1. Improve over-defense and retrain:
+   `python fetch_datasets.py && python train_transformer.py`.
 2. Check the report: zero false positives on the project sets, and a
    false-positive rate on NotInject / PromptShield you are willing to ship.
 3. Flip Config.ML_DETECTOR_CAN_BLOCK to True.
@@ -69,6 +70,11 @@ def _load():
             bundle = joblib.load(MODEL_PATH)
             if "pipeline" not in bundle:
                 raise ValueError("artifact has no 'pipeline' key")
+            # Warm-up: a model with an embedding block needs its ONNX files
+            # too. If they are missing this fails here, so the layer reports
+            # itself unavailable instead of erroring on every request — and
+            # the first real request does not pay the session start-up.
+            bundle["pipeline"].predict_proba(["warm-up"])
             _model = bundle
         except Exception:
             # No model file, no scikit-learn, or an artifact from an
@@ -94,6 +100,7 @@ def model_info() -> dict:
         "n_rows": bundle.get("n_rows"),
         "sources": bundle.get("sources", []),
         "sklearn_version": bundle.get("sklearn_version"),
+        "kind": bundle.get("kind", "tfidf"),
     }
 
 

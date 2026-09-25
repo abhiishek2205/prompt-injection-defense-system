@@ -1,0 +1,9 @@
+{
+  "base_repo": "sentence-transformers/all-MiniLM-L6-v2",
+  "base_revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+  "licence": "Apache-2.0",
+  "max_length": 256,
+  "epochs": 2,
+  "train_rows": 26685,
+  "trained_at": "2026-09-25T15:07:49Z"
+}
