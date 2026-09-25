@@ -93,6 +93,20 @@ GROQ_API_KEY = "your-groq-api-key-here"
 
 ---
 
+**If the dashboard answers "Error: Target System Unavailable":**
+
+- The keys must be in `backend/.streamlit/secrets.toml` — the `.example` file
+  is only a template and is never read.
+- Keys are read at start-up: restart the backend after editing (`--reload`
+  only watches `.py` files).
+- The server log names the cause, e.g.
+  `Groq target error (llama-3.3-70b-versatile): AuthenticationError: 401 … Invalid API Key`
+  for a bad key. If it says the model is decommissioned or not found, set
+  `GROQ_MODEL` (or `GEMINI_MODEL`) in `secrets.toml` to a current model name.
+- At start-up the log also warns about any key that is not set.
+
+---
+
 ### Step 3 — Install backend dependencies
 
 From the repository root:

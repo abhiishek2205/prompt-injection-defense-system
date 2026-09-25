@@ -1,4 +1,8 @@
+import logging
 import os
+
+logger = logging.getLogger("nexuscore.target")
+
 
 def _get_secret(key):
     try:
@@ -14,12 +18,25 @@ def _set_session(key, value):
     except Exception:
         pass
 
+
+def _report_error(message):
+    """Log an LLM failure and keep it for the Streamlit UI.
+
+    The dashboard only shows "Target System Unavailable"; the cause (bad key,
+    retired model, rate limit) goes to the server log so it can be fixed.
+    """
+    logger.warning(message)
+    _set_session("last_raw_error", message)
+
 from google import genai
 from groq import Groq
 
 groq_client = Groq(api_key=_get_secret("GROQ_API_KEY"))
 
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+# Overridable (environment or .streamlit/secrets.toml) because providers
+# retire models; a retired one fails every call with "Target System Unavailable".
+GROQ_MODEL = os.environ.get("GROQ_MODEL") or "llama-3.3-70b-versatile"
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash-lite"
 
 # Built lazily: google.genai raises from the Client constructor when no API key
 # is set, where the old SDK's genai.configure() accepted an empty one. The Groq
@@ -309,7 +326,7 @@ def get_target_response_groq(user_prompt: str) -> str:
     # Safe prompt — call LLM normally
     try:
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=GROQ_MODEL,
             messages=[
                 {"role": "system", "content": VULNERABLE_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt}
@@ -319,7 +336,7 @@ def get_target_response_groq(user_prompt: str) -> str:
         )
         return response.choices[0].message.content
     except Exception as e:
-        _set_session("last_raw_error", f"Groq Target Error: {str(e)}")
+        _report_error(f"Groq target error ({GROQ_MODEL}): {type(e).__name__}: {e}")
         return "Error: Target System Unavailable."
 
 
@@ -338,7 +355,7 @@ def get_target_response(user_prompt: str) -> str:
         )
         return response.text
     except Exception as e:
-        _set_session("last_raw_error", f"Gemini Target Error: {str(e)}")
+        _report_error(f"Gemini target error ({GEMINI_MODEL}): {type(e).__name__}: {e}")
         return "Error: Target System Unavailable."
 
 

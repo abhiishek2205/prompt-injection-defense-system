@@ -13,6 +13,7 @@ IMPROVEMENTS ADDED:
 - Prompt length anomaly detection
 """
 
+import logging
 import os
 from google import genai
 from groq import Groq
@@ -54,6 +55,17 @@ def _set_session(key, value):
         st.session_state[key] = value
     except Exception:
         pass
+
+
+def _report_error(message):
+    """Log an LLM failure and keep it for the Streamlit UI.
+
+    Every caller degrades gracefully (usually to the local detector), which
+    hides the cause — a bad key, a retired model, a rate limit. The log is
+    where it stays visible.
+    """
+    logging.getLogger("nexuscore.defense").warning(message)
+    _set_session("last_raw_error", message)
 
 
 # Gemini client.
@@ -98,8 +110,10 @@ groq_client = Groq(api_key=_get_secret("GROQ_API_KEY"))
 class Config:
     """Central configuration for all defense parameters."""
     # LLM Settings
-    GEMINI_MODEL = "gemini-2.5-flash-lite"
-    GROQ_MODEL = "llama-3.3-70b-versatile"
+    # Overridable via the environment or .streamlit/secrets.toml, because
+    # providers retire models (see target.py).
+    GEMINI_MODEL = os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash-lite"
+    GROQ_MODEL = os.environ.get("GROQ_MODEL") or "llama-3.3-70b-versatile"
     LLM_TEMPERATURE = 0.1
     LLM_MAX_TOKENS_GUARDRAIL = 200
     LLM_MAX_TOKENS_REPROMPT = 300
@@ -675,13 +689,11 @@ Examples:
         return attach_ml_opinion(result, ml_result)
         
     except json.JSONDecodeError as e:
-        _set_session("last_raw_error",
-                     f"🛡️ Defense JSON Parse Error:\n{type(e).__name__}: {str(e)}")
+        _report_error(f"🛡️ Defense JSON Parse Error:\n{type(e).__name__}: {str(e)}")
         return attach_ml_opinion(
             local_pattern_detector(sanitized_input, threat_score), ml_result)
     except Exception as e:
-        _set_session("last_raw_error",
-                     f"🛡️ Defense API Error:\n{type(e).__name__}: {str(e)}")
+        _report_error(f"🛡️ Defense API Error:\n{type(e).__name__}: {str(e)}")
         return attach_ml_opinion(
             local_pattern_detector(sanitized_input, threat_score), ml_result)
 
@@ -879,8 +891,7 @@ Reply ONLY with JSON."""
         return attach_ml_opinion(result, ml_result)
         
     except Exception as e:
-        _set_session("last_raw_error",
-                     f"🧪 Groq API Error:\n{type(e).__name__}: {str(e)}")
+        _report_error(f"🧪 Groq API Error:\n{type(e).__name__}: {str(e)}")
         # No API key, or the call failed. Fall back to the regex verdict and
         # carry the classifier's opinion for visibility — it does not override,
         # for the same reason it does not block above.
@@ -1135,8 +1146,7 @@ Respond with JSON only."""
         return result
         
     except Exception as e:
-        _set_session("last_raw_error",
-                     f"🔄 Reprompt Error:\n{type(e).__name__}: {str(e)}")
+        _report_error(f"🔄 Reprompt Error:\n{type(e).__name__}: {str(e)}")
         return {
             "can_reprompt": False,
             "reprompted_query": "",
