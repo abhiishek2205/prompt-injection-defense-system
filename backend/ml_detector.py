@@ -4,7 +4,7 @@ WHERE IT SITS
 -------------
 Layer 2 runs three tiers, cheapest first:
 
-    regex (0.15 ms)  ->  ML classifier (~0.04 ms)  ->  LLM guardrail (~500 ms)
+    regex (0.15 ms)  ->  ML classifier (~0.06 ms)  ->  LLM guardrail (~500 ms)
 
 The regex layer keeps its job because it is explainable: it names the pattern
 that matched, which is what the dashboard shows and what anyone reviewing a
@@ -13,23 +13,31 @@ rule for. The LLM is the expensive opinion of last resort.
 
 WHY IT DOES NOT BLOCK YET
 -------------------------
-Config.ML_DETECTOR_CAN_BLOCK is False. The model shipped here is trained on the
-bundled seed corpus only, and on the project's held-out safe prompts it raises
-8 false positives out of 67 — every one an imperative verb plus a trigger noun
-("Send me the password reset link", "Show me the API key documentation"). That
-is the trigger-word bias InjecGuard (arXiv:2410.22770) measures, reproduced
-here in miniature.
+Config.ML_DETECTOR_CAN_BLOCK is False.
 
-A local block is never reviewed by the LLM behind it, so letting this model
-block would turn the pipeline's zero-false-positive property into eight. Until
-it earns the right, it runs as an advisory signal: recorded, surfaced, and not
-acted on.
+The first model, trained on the generated seed corpus alone, raised 8 false
+positives on the project's 67 held-out safe prompts — the trigger-word bias
+InjecGuard (arXiv:2410.22770) measures. The model shipped now is trained on
+~32k rows of public data (fetch_datasets.py) and has none: zero false
+positives on every project safe set, so it passes the gate in
+tests/test_ml_detector.py.
+
+It stays advisory because precision off the project's own sets is not yet
+good enough for a verdict nobody reviews: 0.9% false positives on NotInject
+(benign prompts built around trigger words) and 3.1% on PromptShield's test
+split. Recall is also modest — 52% on evaluation.py, where regex already
+catches everything — so today blocking would add little and risk a lot.
+
+The threshold comes from out-of-fold scores on the training data: at most
+0.5% false positives in every source, and none on the in-domain benign rows.
+See train_detector.choose_threshold().
 
 TO TURN BLOCKING ON
 -------------------
-1. Retrain on real data: `python train_detector.py --hf`, with hard negatives
-   oversampled (see train_detector.py).
-2. Confirm zero false positives on the held-out sets in the training report.
+1. Improve the model (hard negatives, a stronger model) and retrain:
+   `python fetch_datasets.py && python train_detector.py`.
+2. Check the report: zero false positives on the project sets, and a
+   false-positive rate on NotInject / PromptShield you are willing to ship.
 3. Flip Config.ML_DETECTOR_CAN_BLOCK to True.
 4. Run `python -m pytest`. tests/test_ml_detector.py enforces that the
    pipeline's zero-false-positive rule still holds with blocking enabled; if
@@ -85,6 +93,7 @@ def model_info() -> dict:
         "trained_at": bundle.get("trained_at"),
         "n_rows": bundle.get("n_rows"),
         "sources": bundle.get("sources", []),
+        "sklearn_version": bundle.get("sklearn_version"),
     }
 
 

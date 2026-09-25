@@ -87,22 +87,45 @@ def test_model_info_reports_provenance():
 # Wiring
 # ---------------------------------------------------------------------------
 
-@requires_model
-def test_classifier_does_not_block_while_the_flag_is_off():
-    """Advisory means advisory: no verdict may come back as ml_classifier."""
+class _GroqDown:
+    """Stands in for defense.groq_client when the API is unreachable."""
+    class chat:
+        class completions:
+            @staticmethod
+            def create(**_):
+                raise ConnectionError("offline test")
+
+
+def test_classifier_does_not_block_while_the_flag_is_off(monkeypatch):
+    """Advisory means advisory: even a classifier that flags everything
+    cannot produce a block while the flag is off."""
     assert Config.ML_DETECTOR_CAN_BLOCK is False, (
         "if you enabled blocking, test_pipeline_keeps_zero_false_positives "
         "must pass — read ml_detector.py first")
 
-    flagged = [p for p in SAFE_HOLDOUT
-               if ml_detector.predict(sanitize_input(p))["is_malicious"]]
-    assert flagged, (
-        "the bundled model is expected to over-flag some safe prompts; if it "
-        "no longer does, retrain happened — consider enabling CAN_BLOCK")
+    monkeypatch.setattr(defense, "ml_opinion", lambda _: {
+        "available": True, "is_malicious": True, "confidence": 0.99,
+        "threshold": 0.5, "detection_method": "ml_classifier"})
+    monkeypatch.setattr(defense, "groq_client", _GroqDown)
 
-    # ...and none of that reaches a verdict, because the flag is off.
-    for prompt in flagged:
-        assert not local_pattern_detector(sanitize_input(prompt))["is_malicious"]
+    verdict = defense.security_guardrail_groq("How do I write a for loop in Python?")
+    assert verdict["is_malicious"] is False
+    assert verdict.get("detection_method") != "ml_classifier"
+    # ...but the opinion is still carried for the dashboard.
+    assert verdict["ml_opinion"]["is_malicious"] is True
+
+
+def test_classifier_blocks_when_the_flag_is_on(monkeypatch):
+    """The other half of the wiring: with the flag on, its verdict is final."""
+    monkeypatch.setattr(Config, "ML_DETECTOR_CAN_BLOCK", True)
+    monkeypatch.setattr(defense, "ml_opinion", lambda _: {
+        "available": True, "is_malicious": True, "confidence": 0.99,
+        "threshold": 0.5, "detection_method": "ml_classifier"})
+    monkeypatch.setattr(defense, "groq_client", _GroqDown)
+
+    verdict = defense.security_guardrail_groq("How do I write a for loop in Python?")
+    assert verdict["is_malicious"] is True
+    assert verdict["detection_method"] == "ml_classifier"
 
 
 # ---------------------------------------------------------------------------
@@ -143,17 +166,20 @@ def test_pipeline_keeps_zero_false_positives():
 
 
 @requires_model
-def test_enabling_blocking_today_would_regress_precision(monkeypatch):
-    """Documents why the flag is off, and fails if that stops being true.
+def test_bundled_model_would_pass_the_gate_if_enabled(monkeypatch):
+    """The committed model must be one that could safely be allowed to block.
 
-    If a retrain makes this pass with no false positives, the reason for
-    keeping blocking disabled has gone — flip the flag and delete this test.
+    Blocking is still off (Config.ML_DETECTOR_CAN_BLOCK), but the model shipped
+    in models/ has to keep zero false positives on every labeled SAFE case and
+    held-out safe prompt with it switched on. The seed-only model failed this
+    with 8; the model trained on public data passes. A retrain that brings
+    false positives back must not be committed.
     """
     monkeypatch.setattr(Config, "ML_DETECTOR_CAN_BLOCK", True)
     blocked = _false_positives_with_blocking()
-    assert blocked, (
-        "the bundled model no longer costs precision — enable "
-        "Config.ML_DETECTOR_CAN_BLOCK and remove this test")
+    assert not blocked, (
+        f"{len(blocked)} legitimate prompt(s) would be blocked: "
+        + "; ".join(f"{p!r} [{why}]" for p, why in blocked[:8]))
 
 
 # ---------------------------------------------------------------------------

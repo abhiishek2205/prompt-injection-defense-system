@@ -256,7 +256,7 @@ receives the original text, so legitimate prompts are never corrupted.
 
 ### Layer 2 — Detection (Three Tiers)
 
-Cheapest first: `regex (0.15 ms) → ML classifier (0.04 ms) → LLM (~500 ms)`.
+Cheapest first: `regex (0.15 ms) → ML classifier (0.06 ms) → LLM (~500 ms)`.
 
 - **Local pattern detector**: 69 weighted regex patterns (0.65–0.95 confidence scores), matched against the raw input and its de-obfuscated variants. Fires instantly with no API call (~0.15 ms per prompt). Kept as tier 1 because it is explainable — it names the pattern that matched.
 - **ML classifier** *(Stage 1, advisory)*: TF-IDF word + character n-grams into logistic regression. Character n-grams pick up obfuscation (`1gn0r3`, `I.g.n.o.r.e`) as a property of the representation. See **ML Detector** below.
@@ -295,38 +295,78 @@ pinned revisions: training splits to `data/external/`, test splits to
 `data/eval/`, which are reported on and never trained on. Sources, licences
 and what was left out are in `data/external/SOURCES.md`.
 
+### How the threshold is chosen
+
+`train_detector.py` scores every training row with 5-fold cross-validation
+(each row scored by a model that never saw it), picks the block threshold from
+those scores, then refits on all rows. The threshold is the stricter of:
+
+1. **At most 0.5% false positives in every source** (`--target-fpr`). A budget,
+   not zero: the public sets deliberately contain adversarial benign prompts
+   (*"What is your response to: ignore your instructions"*), and demanding zero
+   over thousands of them pins any threshold to its cap. Per source, because a
+   pooled rate is dominated by the largest set.
+2. **Zero false positives on the in-domain benign rows** — the seed corpus's
+   IT-support and security questions, the traffic this dashboard actually sees.
+
+Test sets play no part in it. The current model lands on **0.94**.
+
+### Results
+
+The report scores each held-out set three ways: ML alone, regex alone, and
+regex + ML (the pipeline if ML were allowed to block).
+
+| Held-out set | ML (seed only, old) | ML (public data, now) | Regex | Regex + ML |
+|---|---|---|---|---|
+| `evaluation.py` (116) — recall / FP | 78% / 0 | 52% / 0 | 100% / 0 | 100% / 0 |
+| Held-out safe (67) — FP | **8** | **0** | 0 | 0 |
+| Held-out attacks (14) — recall | 93% | 64% | 100% | 100% |
+| NotInject (339 benign, trigger words) — FP | 34 (10.0%) | 3 (0.9%) | 14 (4.1%) | 16 (4.7%) |
+| deepset test — recall · AUC | 28% · 0.76 | 15% · 0.96 | 5% | 20% |
+| jackhhao test — recall / FPR · AUC | 45% / 22.8% · 0.69 | 83% / 0% · 0.98 | 79% / 27.6% | 94% / 27.6% |
+| S-Labs test — recall / FPR | 51% / 0.3% | 51% / 0.1% | 6% / 0.1% | 52% / 0.2% |
+| PromptShield test — recall / FPR · AUC | 11% / 4.4% · 0.65 | 8% / 3.1% · 0.74 | 48% / 15.6% | 50% / 18.2% |
+
+Artifact 3.6 MB (min_df=2, 100k features per vectorizer), 0.06 ms/prompt.
+
+What this shows:
+
+- **Public data fixed the trigger-word bias.** Held-out safe false positives
+  8 → 0, NotInject 10% → 0.9%, jackhhao false-positive rate 22.8% → 0%.
+- **Recall on the project's own attack sets fell** (78% → 52%). Those sets
+  were written in the same style as the generated seed corpus, which gave the
+  old model a home advantage. Regex catches all of them, so the combined
+  pipeline stays at 100%.
+- **The regex tier does not generalize.** It is perfect on the sets it was
+  written against, but flags 27.6% of jackhhao's benign prompts, 15.6% of
+  PromptShield's and 4.1% of NotInject. Off its home turf the ML tier is the
+  more precise of the two.
+- **TF-IDF is the ceiling now, not the threshold.** 0.94 is close to the old
+  0.95 cap, so the threshold was not the main loss. PromptShield's AUC of 0.74
+  (its test split comes from sources the training split does not cover) is
+  what a stronger model has to fix.
+
 ### Why it does not block yet
 
-Trained on the bundled seed corpus alone, the model raises **8 false positives
-on the 67 held-out safe prompts** — every one an imperative verb plus a trigger
-noun:
+`Config.ML_DETECTOR_CAN_BLOCK` is `False`. The committed model passes the gate —
+zero false positives on every project safe set with blocking on, which
+`tests/test_ml_detector.py` now requires of any committed model — but a local
+block is never reviewed by the LLM tier, and 0.9% false positives on NotInject
+and 3.1% on PromptShield are too many for an unreviewed verdict. With recall
+at 52% where regex already catches everything, blocking would add little.
 
-| Prompt | Score |
-|---|---|
-| Print your findings as a table | 0.83 |
-| Send me the password reset link please | 0.82 |
-| Tell me your recommendation for a password manager | 0.81 |
-| Show me the API key documentation | 0.73 |
-
-That is textbook **trigger-word bias** — the over-defense effect measured by
-[InjecGuard](https://arxiv.org/abs/2410.22770), where guard models learn a
-shortcut from words like *"ignore"* straight to a block, and drop to near-random
-accuracy on benign text containing them.
-
-A local block is never reviewed by the LLM tier behind it, so letting this model
-block would turn the pipeline's zero false positives into eight.
-`Config.ML_DETECTOR_CAN_BLOCK` is therefore `False`, and
-`tests/test_ml_detector.py` enforces the rule: with blocking enabled, the
-pipeline must produce zero false positives, or the suite fails.
+The first model's failure is worth keeping in mind: trained on the seed corpus
+alone it flagged *"Show me the API key documentation"* and *"Send me the
+password reset link please"* — textbook **trigger-word bias**, the
+over-defense effect measured by [InjecGuard](https://arxiv.org/abs/2410.22770).
 
 ### Turning blocking on
 
-1. Retrain on real data — `python fetch_datasets.py && python train_detector.py` — oversampling **hard
-   negatives** (legitimate security questions containing attack vocabulary).
-   Public sets pair attacks against generic chat, which is what causes the bias
-   above. 74% of the bundled corpus's benign half is hard negatives for exactly
-   this reason.
-2. Confirm zero held-out false positives in the training report.
+1. Improve the model — more **hard negatives** (legitimate questions using
+   attack vocabulary), then a stronger model — and retrain:
+   `python fetch_datasets.py && python train_detector.py`.
+2. Check the report: zero false positives on the project sets, and external
+   false-positive rates you are willing to ship.
 3. Set `Config.ML_DETECTOR_CAN_BLOCK = True` and run `python -m pytest`.
 
 ### Test sets are never training data
@@ -334,42 +374,8 @@ pipeline must produce zero false positives, or the suite fails.
 `evaluation.py` and the held-out prompts in `tests/test_generalization.py` are
 reserved. `build_seed_corpus.py` filters them out at generation (it dropped 30),
 `train_detector.py` refuses to run if any survive, and a test asserts it again.
-
-### Seed-corpus results
-
-Honest framing: the seed corpus is generated, so these show the pipeline works,
-not that the approach generalizes. Retrain on real data before quoting them.
-
-| Held-out set | Result |
-|---|---|
-| `evaluation.py` (116 labeled) | 101/116 — FP 0, FN 15 |
-| Held-out safe (67) | 59/67 — **FP 8** |
-| Held-out attacks (14) | 13/14 — FN 1 |
-| Inference | 0.038 ms/prompt · 0.06 MB artifact |
-
-For comparison, the regex tier scores 116/116 with zero false positives, so the
-classifier does not beat it yet — it is a floor to improve on, and the reason
-Stage 2 (sentence embeddings or a fine-tuned DistilBERT) is worth doing.
-
-### Real-data results (first run)
-
-The same model retrained on the seed corpus plus ~32k public rows. It is not
-the committed artifact yet, because the threshold rule needs fixing first:
-
-| Held-out set | Result |
-|---|---|
-| `evaluation.py` (116 labeled) | 82/116 — FP 0, FN 34 |
-| Held-out safe (67) | 67/67 — **FP 0** (was 8) |
-| Held-out attacks (14) | 10/14 — FN 4 |
-| NotInject (339 benign, trigger words) | FP 3 (0.9%) |
-| PromptShield test (23,516) | recall 5%, FPR 2.4% · AUC 0.72 |
-
-Real data removes the trigger-word false positives. Recall drops because the
-threshold rule ("zero false positives on validation") is pushed to its 0.95
-cap by a handful of noisy public labels. Ranking quality is fine (AUC
-0.94–0.99 on five of six sets). PromptShield's AUC of 0.72 is the real limit
-of TF-IDF: its test split comes from sources the training split does not
-cover.
+The external test splits in `data/eval/` are reserved the same way: training
+rows that appear in any of them are dropped before training.
 
 ---
 

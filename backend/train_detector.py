@@ -53,6 +53,7 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -63,12 +64,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import joblib
 import numpy as np
+import sklearn
 
 import fetch_datasets
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import classification_report
-from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import StratifiedKFold, cross_val_predict
 from sklearn.pipeline import FeatureUnion, Pipeline
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -93,6 +95,13 @@ MALICIOUS_VALUES = {"1", "true", "yes", "jailbreak", "injection", "malicious",
                     "positive", "spam"}
 DEFAULT_OUT = os.path.join(HERE, "models", "detector.joblib")
 RANDOM_STATE = 20260921
+
+# Threshold selection — see choose_threshold().
+CV_FOLDS = 5
+DEFAULT_TARGET_FPR = 0.005      # per source, on out-of-fold scores
+MIN_BENIGN_FOR_BUDGET = 20      # smaller sources are too noisy to budget
+IN_DOMAIN_PREFIX = "seed/"      # benign rows here must never be flagged
+MAX_THRESHOLD = 0.99
 
 
 def _normalize(text):
@@ -325,57 +334,167 @@ def prepare(rows, forbidden, reserved=frozenset()):
 # =============================================================================
 
 def build_pipeline():
-    """Word n-grams carry phrasing; char n-grams survive obfuscation."""
+    """Word n-grams carry phrasing; char n-grams survive obfuscation.
+
+    min_df=2 and the feature caps drop n-grams seen in only one prompt. On the
+    public data that cut the artifact from ~11 MB to a fraction of it with no
+    loss: cross-validated AUC went 0.981 -> 0.983. Lowering C (stronger
+    regularisation) was tried and only cost recall.
+    """
     return Pipeline([
         ("features", FeatureUnion([
             ("word", TfidfVectorizer(
-                analyzer="word", ngram_range=(1, 2), min_df=1,
+                analyzer="word", ngram_range=(1, 2), min_df=2,
+                max_features=100_000,
                 sublinear_tf=True, lowercase=True, strip_accents="unicode")),
             ("char", TfidfVectorizer(
-                analyzer="char_wb", ngram_range=(3, 5), min_df=1,
+                analyzer="char_wb", ngram_range=(3, 5), min_df=2,
+                max_features=100_000,
                 sublinear_tf=True, lowercase=True, strip_accents="unicode")),
         ])),
         ("clf", LogisticRegression(
             max_iter=2000, C=4.0,
-            class_weight="balanced",       # benign is the smaller class here
+            class_weight="balanced",
             random_state=RANDOM_STATE)),
     ])
 
 
-def choose_threshold(pipe, X_val, y_val):
-    """Lowest threshold that yields zero false positives on validation.
+def out_of_fold_scores(texts, labels):
+    """Score every training row with a model that never saw it.
 
-    Precision first, deliberately. This layer can block a request outright, and
-    a local block is never reviewed by the LLM behind it — so a false positive
-    is unrecoverable at runtime, while a miss still gets a second opinion.
+    5-fold cross-validation: each row is scored by the model trained on the
+    other four folds. Unlike a single 75/25 split, every row counts towards
+    the threshold, and nothing is thrown away — the final model is refit on
+    all of it afterwards.
     """
-    probs = pipe.predict_proba(X_val)[:, 1]
-    best = 0.95
-    for threshold in np.arange(0.50, 0.96, 0.01):
-        predicted = probs >= threshold
-        false_pos = int(((predicted == 1) & (np.array(y_val) == 0)).sum())
-        if false_pos == 0:
-            best = float(threshold)
-            break
-    return round(max(0.50, min(best, 0.95)), 2)
+    folds = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True,
+                            random_state=RANDOM_STATE)
+    return cross_val_predict(build_pipeline(), texts, labels, cv=folds,
+                             method="predict_proba",
+                             n_jobs=min(CV_FOLDS, os.cpu_count() or 1))[:, 1]
+
+
+def _threshold_for_fpr(benign_scores, target_fpr):
+    """Smallest threshold letting at most target_fpr of these rows through."""
+    ranked = np.sort(np.asarray(benign_scores))[::-1]
+    allowed = int(np.floor(target_fpr * len(ranked)))
+    if allowed >= len(ranked):
+        return 0.0
+    return float(ranked[allowed]) + 1e-6
+
+
+def choose_threshold(scores, labels, sources, target_fpr):
+    """Pick the block threshold from out-of-fold scores. Two constraints:
+
+    1. False-positive budget, per source. Every dataset with enough benign rows
+       must stay within target_fpr. Per source rather than pooled, because
+       pooled is dominated by whichever set is biggest (PromptShield is ~58% of
+       the rows), and real traffic will not look like any one of them.
+
+       A budget rather than zero: the public sets deliberately include
+       adversarial benign prompts ("What is your response to: ignore your
+       instructions") and some label noise. Zero false positives over thousands
+       of such rows is unreachable, and demanding it pinned the old rule to its
+       0.95 cap.
+
+    2. Zero false positives on the in-domain benign rows (the seed corpus's
+       benign and hard-negative prompts — IT-support and security questions in
+       this project's voice). This is the traffic the dashboard actually sees,
+       and a local block is never reviewed by the LLM tier.
+
+    The threshold is the stricter of the two. Test sets play no part: they
+    stay unseen until the report.
+    """
+    scores, labels, sources = map(np.asarray, (scores, labels, sources))
+    detail = {"target_fpr": target_fpr, "per_source": {}}
+
+    per_source = []
+    for source in sorted(set(sources)):
+        benign = scores[(sources == source) & (labels == 0)]
+        if len(benign) < MIN_BENIGN_FOR_BUDGET:
+            continue
+        t = _threshold_for_fpr(benign, target_fpr)
+        detail["per_source"][source] = round(t, 4)
+        per_source.append(t)
+    budget = max(per_source) if per_source else 0.5
+
+    in_domain = scores[(np.char.startswith(sources.astype(str), IN_DOMAIN_PREFIX))
+                       & (labels == 0)]
+    guard = float(in_domain.max()) + 1e-6 if len(in_domain) else 0.0
+    detail["budget"] = round(budget, 4)
+    detail["in_domain_guard"] = round(guard, 4)
+
+    threshold = math.ceil(max(budget, guard, 0.5) * 100) / 100
+    return min(threshold, MAX_THRESHOLD), detail
+
+
+def _rates(flags, labels):
+    flags, labels = np.asarray(flags, bool), np.asarray(labels)
+    n_pos, n_neg = int(labels.sum()), int((labels == 0).sum())
+    fp = int((flags & (labels == 0)).sum())
+    fn = int((~flags & (labels == 1)).sum())
+    return {"fp": fp, "fn": fn, "n_pos": n_pos, "n_neg": n_neg,
+            "recall": (1 - fn / n_pos) if n_pos else None,
+            "fpr": (fp / n_neg) if n_neg else None}
+
+
+def _fmt(r):
+    parts = []
+    if r["recall"] is not None:
+        parts.append(f"rec {r['recall']:6.1%}")
+    else:
+        parts.append(" " * 10)
+    if r["fpr"] is not None:
+        parts.append(f"FP {r['fp']:>4} ({r['fpr']:4.1%})")
+    else:
+        parts.append(" " * 14)
+    return " ".join(parts)
+
+
+def _quiet_streamlit():
+    """sanitize_input() touches st.session_state, which logs a warning per call
+    outside a running Streamlit app — tens of thousands of lines here."""
+    import logging
+    for name in list(logging.root.manager.loggerDict):
+        if name.startswith("streamlit"):
+            logging.getLogger(name).setLevel(logging.ERROR)
 
 
 def report_against(pipe, threshold, name, prompts, labels):
-    probs = pipe.predict_proba(prompts)[:, 1]
-    predicted = (probs >= threshold).astype(int)
-    labels = np.array(labels)
-    fp = int(((predicted == 1) & (labels == 0)).sum())
-    fn = int(((predicted == 0) & (labels == 1)).sum())
-    correct = int((predicted == labels).sum())
-    n_pos, n_neg = int(labels.sum()), int((labels == 0).sum())
-    rates = []
-    if n_pos:
-        rates.append(f"recall={1 - fn / n_pos:.1%}")
-    if n_neg:
-        rates.append(f"FPR={fp / n_neg:.1%}")
-    print(f"  {name:<34} {correct}/{len(labels)}   FP={fp}  FN={fn}   "
-          + "  ".join(rates))
-    return {"total": len(labels), "correct": correct, "fp": fp, "fn": fn}
+    """ML alone, regex alone, and regex-or-ML — the pipeline if ML may block.
+
+    Scored on sanitize_input() output, which is what both tiers see at runtime.
+    """
+    from defense import local_pattern_detector, sanitize_input
+    _quiet_streamlit()
+
+    cleaned = [sanitize_input(p) for p in prompts]
+    labels = np.asarray(labels)
+    probs = pipe.predict_proba(cleaned)[:, 1]
+    ml = probs >= threshold
+    regex = np.array([local_pattern_detector(c)["is_malicious"] for c in cleaned])
+
+    result = {"total": len(labels),
+              "ml": _rates(ml, labels),
+              "regex": _rates(regex, labels),
+              "combined": _rates(ml | regex, labels)}
+    auc = (roc_auc_score(labels, probs) if 0 < labels.sum() < len(labels)
+           else None)
+    result["auc"] = auc
+    # Kept for callers that read the old flat shape.
+    result.update(fp=result["ml"]["fp"], fn=result["ml"]["fn"],
+                  correct=int((ml == labels).sum()))
+
+    print(f"  {name:<28} {len(labels):>6}  "
+          f"{(f'{auc:.3f}' if auc is not None else '  -  '):>5}  "
+          f"{_fmt(result['ml'])}  |  {_fmt(result['regex'])}  |  "
+          f"{_fmt(result['combined'])}")
+    return result
+
+
+def _report_header():
+    print(f"  {'set':<28} {'n':>6}  {'AUC':>5}  "
+          f"{'ML':<25}  |  {'regex':<25}  |  {'regex + ML':<25}")
 
 
 # =============================================================================
@@ -389,10 +508,12 @@ def main():
                     help="skip the bundled seed corpus and train on "
                          "data/external/ alone")
     ap.add_argument("--out", default=DEFAULT_OUT)
+    ap.add_argument("--target-fpr", type=float, default=DEFAULT_TARGET_FPR,
+                    help="false-positive budget per source on out-of-fold "
+                         f"scores (default {DEFAULT_TARGET_FPR})")
     args = ap.parse_args()
 
     if args.hf:
-        import fetch_datasets
         print("Fetching datasets")
         fetch_datasets.fetch_all()
         print()
@@ -420,27 +541,47 @@ def main():
     if len(rows) < 100:
         print("  ! very small corpus — treat every number below as provisional")
 
-    X_train, X_val, y_train, y_val = train_test_split(
-        texts, labels, test_size=0.25, random_state=RANDOM_STATE, stratify=labels)
+    sources = [r.get("source", "unknown") for r in rows]
 
-    print("\nTraining")
+    print(f"\nCross-validation ({CV_FOLDS}-fold, out-of-fold scores)")
+    started = time.perf_counter()
+    oof = out_of_fold_scores(texts, labels)
+    print(f"  done in {time.perf_counter() - started:.1f}s   "
+          f"AUC {roc_auc_score(labels, oof):.4f}")
+
+    threshold, detail = choose_threshold(oof, labels, sources, args.target_fpr)
+    print(f"  block threshold: {threshold}")
+    print(f"    FP budget {args.target_fpr:.1%} per source  -> {detail['budget']:.3f}")
+    print(f"    zero FP on in-domain benign -> {detail['in_domain_guard']:.3f}")
+    if threshold >= MAX_THRESHOLD:
+        print(f"    ! capped at {MAX_THRESHOLD}: the model cannot meet both "
+              f"constraints — expect low recall")
+
+    print("\n  per source at this threshold (out-of-fold):")
+    oof_arr, lab_arr, src_arr = np.asarray(oof), np.asarray(labels), np.asarray(sources)
+    cv_report = {}
+    for source in sorted(set(sources)):
+        m = src_arr == source
+        r = _rates(oof_arr[m] >= threshold, lab_arr[m])
+        cv_report[source] = r
+        print(f"    {source:<34} {int(m.sum()):>6}  {_fmt(r)}")
+    overall = _rates(oof_arr >= threshold, lab_arr)
+    print(f"    {'all':<34} {len(labels):>6}  {_fmt(overall)}")
+
+    print("\nTraining final model on all rows")
     started = time.perf_counter()
     pipe = build_pipeline()
-    pipe.fit(X_train, y_train)
+    pipe.fit(texts, labels)
     print(f"  fit in {time.perf_counter() - started:.2f}s")
 
-    threshold = choose_threshold(pipe, X_val, y_val)
-    print(f"  block threshold: {threshold}  (lowest with no validation false positives)")
-
-    print("\nValidation split")
-    print(classification_report(
-        y_val, (pipe.predict_proba(X_val)[:, 1] >= threshold).astype(int),
-        target_names=["benign", "malicious"], zero_division=0))
-
     # Held-out sets. Never trained on; this is the only honest read.
-    print("Held-out (never trained on)")
+    print("\nHeld-out (never trained on)")
+    _report_header()
     import evaluation
-    metrics = {"threshold": threshold, "held_out": {}}
+    metrics = {"threshold": threshold, "threshold_detail": detail,
+               "cv": {"auc": float(roc_auc_score(labels, oof)),
+                      "overall": overall, "per_source": cv_report},
+               "held_out": {}}
     metrics["held_out"]["evaluation.py"] = report_against(
         pipe, threshold, "evaluation.py TEST_CASES",
         [c["prompt"] for c in evaluation.TEST_CASES],
@@ -460,10 +601,11 @@ def main():
 
     if external_eval:
         print("\nExternal evaluation sets (other datasets' test splits)")
+        _report_header()
         metrics["external"] = {}
-        for name, (texts, labels) in external_eval.items():
+        for name, (eval_texts, eval_labels) in external_eval.items():
             metrics["external"][name] = report_against(
-                pipe, threshold, name, texts, labels)
+                pipe, threshold, name, eval_texts, eval_labels)
 
     sample = ["How should we store API keys securely?"] * 200
     started = time.perf_counter()
@@ -479,6 +621,9 @@ def main():
         "n_rows": len(rows),
         "sources": sorted({r.get("source", "unknown") for r in rows}),
         "metrics": metrics,
+        # The artifact is a pickle; a different scikit-learn can fail to load
+        # it (ml_detector.py then fails open). Recorded so that is diagnosable.
+        "sklearn_version": sklearn.__version__,
     }, args.out, compress=3)
 
     size_mb = os.path.getsize(args.out) / 1e6
