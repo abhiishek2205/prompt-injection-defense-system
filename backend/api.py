@@ -34,7 +34,9 @@ from defense import (
     reprompt_malicious,
     contain_output,
     analyze_conversation_context,
-    local_pattern_detector
+    local_pattern_detector,
+    ml_opinion,
+    attach_ml_opinion,
 )
 from target import get_target_response_groq, get_target_response
 from evaluation import get_ground_truth
@@ -76,6 +78,15 @@ class SessionState:
         self.eval_fp = 0
         self.eval_fn = 0
         self.eval_latencies = []
+        # Shadow mode: what the ML tier would have done, next to what the
+        # pipeline actually did. This is the evidence for (or against)
+        # enabling Config.ML_DETECTOR_CAN_BLOCK on real traffic.
+        self.ml_scored = 0
+        self.ml_flagged = 0
+        self.ml_would_add = 0      # ML flagged, pipeline let it through
+        self.ml_missed = 0         # pipeline caught it, ML did not flag it
+        self.ml_eval_fp = 0        # vs. ground truth, labeled prompts only
+        self.ml_eval_fn = 0
 
 
 session = SessionState()
@@ -105,6 +116,30 @@ def _record_ground_truth(message: str, is_malicious: bool):
             session.eval_fn += 1
 
 
+def _record_ml_shadow(message: str, security: dict, is_malicious: bool):
+    """Count the ML tier's opinion against the pipeline's verdict.
+
+    The pipeline verdict includes multi-turn detection, which the classifier
+    does not see; a disagreement is not automatically the classifier's error.
+    Where the prompt is in the labeled test set, also score it against ground
+    truth — the direct measure of what blocking would cost or gain.
+    """
+    opinion = security.get("ml_opinion") or {}
+    if not opinion.get("available"):
+        return
+    flagged = bool(opinion.get("is_malicious"))
+    session.ml_scored += 1
+    session.ml_flagged += flagged
+    session.ml_would_add += flagged and not is_malicious
+    session.ml_missed += is_malicious and not flagged
+
+    label = get_ground_truth(message).get("label")
+    if label == "SAFE" and flagged:
+        session.ml_eval_fp += 1
+    elif label == "MALICIOUS" and not flagged:
+        session.ml_eval_fn += 1
+
+
 def _detect(req, sanitized):
     """Layer 2 for both the shielded and comparison paths.
 
@@ -119,7 +154,8 @@ def _detect(req, sanitized):
                     if req.test_mode
                     else security_guardrail(sanitized, req.chat_history, score))
     except Exception:
-        security = local_pattern_detector(sanitized, score)
+        security = attach_ml_opinion(local_pattern_detector(sanitized, score),
+                                     ml_opinion(sanitized))
 
     if not security.get("is_malicious", False):
         history = list(req.chat_history) + [{"role": "user", "content": req.message}]
@@ -128,12 +164,12 @@ def _detect(req, sanitized):
         except Exception:
             multi = {"is_suspicious": False}
         if multi.get("is_suspicious"):
-            security = {
+            security = attach_ml_opinion({
                 "is_malicious": True,
                 "reason": multi.get("reason", "Multi-turn attack detected"),
                 "confidence": multi.get("confidence", 0.75),
                 "detection_method": "multi_turn",
-            }
+            }, security.get("ml_opinion"))
     return security
 
 
@@ -152,6 +188,15 @@ def get_metrics():
         "threat_score": round(session.threat_score, 2),
         "threat_level": get_threat_level_local(session.threat_score),
         "total_queries": len(session.eval_latencies),
+        "ml_shadow": {
+            "can_block": Config.ML_DETECTOR_CAN_BLOCK,
+            "scored": session.ml_scored,
+            "flagged": session.ml_flagged,
+            "would_add": session.ml_would_add,
+            "missed": session.ml_missed,
+            "false_positives": session.ml_eval_fp,
+            "false_negatives": session.ml_eval_fn,
+        },
     }
 
 def get_threat_level_local(score):
@@ -188,6 +233,7 @@ async def chat(req: ChatRequest):
         is_malicious = security.get("is_malicious", False)
         _update_threat_score(is_malicious)
         _record_ground_truth(req.message, is_malicious)
+        _record_ml_shadow(req.message, security, is_malicious)
         shielded_type = "safe"
         shielded_response = ""
         shielded_pipeline = {"sanitize": "pass", "detect": "pass",
@@ -286,6 +332,7 @@ async def chat(req: ChatRequest):
     is_malicious = security.get("is_malicious", False)
     _update_threat_score(is_malicious)
     _record_ground_truth(req.message, is_malicious)
+    _record_ml_shadow(req.message, security, is_malicious)
 
     pipeline = {"sanitize": "pass", "detect": "pass",
                 "reprompt": "skip", "contain": "skip"}

@@ -98,6 +98,25 @@ const PIPE_LABELS = [
 
 const THREAT_COLORS = { LOW: '#22c55e', GUARDED: '#f59e0b', ELEVATED: '#f97316', CRITICAL: '#e94560' }
 
+// ─── ML SHADOW METRICS ──────────────────────────────────────────────────────
+// What the advisory classifier would have done vs. what the pipeline did —
+// the evidence for deciding whether it should ever block.
+const EMPTY_SHADOW = { scored: 0, flagged: 0, would_add: 0, missed: 0,
+                       false_positives: 0, false_negatives: 0, can_block: false }
+
+function shadowBadge(shadow) {
+    if (!shadow || !shadow.scored) return null
+    return {
+        label: 'ML shadow',
+        value: `+${shadow.would_add} / −${shadow.missed}`,
+        title: `ML classifier, ${shadow.can_block ? 'blocking' : 'advisory'} — `
+            + `${shadow.flagged} of ${shadow.scored} messages flagged.\n`
+            + `+${shadow.would_add}: flagged, but the pipeline let it through.\n`
+            + `−${shadow.missed}: caught by the pipeline, not flagged by ML.\n`
+            + `On labeled test prompts: FP ${shadow.false_positives}, FN ${shadow.false_negatives}.`,
+    }
+}
+
 // ─── TOGGLE COMPONENT ──────────────────────────────────────────────────────
 function Toggle({ on, onToggle }) {
     return (
@@ -119,7 +138,7 @@ function Toggle({ on, onToggle }) {
 }
 
 // ─── PIPELINE BAR ───────────────────────────────────────────────────────────
-function PipelineBar({ pipeline }) {
+function PipelineBar({ pipeline, ml }) {
     if (!pipeline) return null
     return (
         <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
@@ -136,7 +155,31 @@ function PipelineBar({ pipeline }) {
                     </span>
                 )
             })}
+            <MlPill ml={ml} delay={PIPE_LABELS.length * 150} />
         </div>
+    )
+}
+
+// ─── ML OPINION PILL ────────────────────────────────────────────────────────
+// The classifier's verdict, shown beside the pipeline. Dashed and amber rather
+// than red: it is advisory (Config.ML_DETECTOR_CAN_BLOCK is off) and did not
+// decide the outcome.
+function MlPill({ ml, delay }) {
+    if (!ml?.available) return null
+    const s = ml.is_malicious ? PIPE_STYLES.warn : PIPE_STYLES.skip
+    const pct = Math.round((ml.confidence || 0) * 100)
+    return (
+        <span
+            title={`ML classifier (advisory): ${pct}% attack probability, `
+                + `flags at ${Math.round((ml.threshold || 0) * 100)}%. `
+                + 'Recorded for shadow metrics; does not block.'}
+            style={{
+                ...s, borderStyle: 'dashed', fontSize: 11, padding: '3px 8px',
+                borderRadius: 6, display: 'inline-flex', alignItems: 'center', gap: 4,
+                animation: `pillAppear 0.25s ease ${delay}ms both`,
+            }}>
+            🤖 ML {pct}%{ml.is_malicious ? ' · would flag' : ''}
+        </span>
     )
 }
 
@@ -213,7 +256,7 @@ function AssistantMessage({ msg }) {
                     )}
                     <ConfidenceBar confidence={conf} />
                 </div>
-                <PipelineBar pipeline={msg.pipeline} />
+                <PipelineBar pipeline={msg.pipeline} ml={msg.security?.ml_opinion} />
             </div>
         )
     }
@@ -249,7 +292,7 @@ function AssistantMessage({ msg }) {
                     )}
                     <div style={{ fontSize: 14, color: '#e0e0e0', lineHeight: 1.6 }}>{msg.content}</div>
                 </div>
-                <PipelineBar pipeline={msg.pipeline} />
+                <PipelineBar pipeline={msg.pipeline} ml={msg.security?.ml_opinion} />
             </div>
         )
     }
@@ -267,7 +310,7 @@ function AssistantMessage({ msg }) {
                     </div>
                     <div style={{ fontSize: 14, color: '#e0e0e0', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{msg.content}</div>
                 </div>
-                <PipelineBar pipeline={msg.pipeline} />
+                <PipelineBar pipeline={msg.pipeline} ml={msg.security?.ml_opinion} />
             </div>
         )
     }
@@ -290,7 +333,7 @@ function AssistantMessage({ msg }) {
                     {msg.content}
                 </div>
             </div>
-            <PipelineBar pipeline={msg.pipeline} />
+            <PipelineBar pipeline={msg.pipeline} ml={msg.security?.ml_opinion} />
         </div>
     )
 }
@@ -338,6 +381,7 @@ export default function App() {
         blocked: 0, safe: 0, reprompted: 0, contained: 0,
         false_positives: 0, false_negatives: 0, avg_latency: 0,
         threat_score: 0, threat_level: 'LOW', total_queries: 0,
+        ml_shadow: EMPTY_SHADOW,
     })
 
     const chatEndRef = useRef(null)
@@ -420,7 +464,7 @@ export default function App() {
     const resetChat = useCallback(async () => {
         try { await fetch(`${API}/reset`, { method: 'POST' }) } catch { /* ok */ }
         setMessages([])
-        setMetrics(prev => ({ ...prev, blocked: 0, safe: 0, reprompted: 0, contained: 0, false_positives: 0, false_negatives: 0, avg_latency: 0, threat_score: 0, threat_level: 'LOW', total_queries: 0 }))
+        setMetrics(prev => ({ ...prev, blocked: 0, safe: 0, reprompted: 0, contained: 0, false_positives: 0, false_negatives: 0, avg_latency: 0, threat_score: 0, threat_level: 'LOW', total_queries: 0, ml_shadow: EMPTY_SHADOW }))
     }, [])
 
     // ── Key handler ──────────────────────────────────────────────────────────
@@ -598,8 +642,9 @@ export default function App() {
                             { label: 'FP', value: metrics.false_positives },
                             { label: 'FN', value: metrics.false_negatives },
                             { label: 'Latency', value: `${metrics.avg_latency}ms` },
-                        ].map(b => (
-                            <span key={b.label} style={{
+                            shadowBadge(metrics.ml_shadow),
+                        ].filter(Boolean).map(b => (
+                            <span key={b.label} title={b.title} style={{
                                 background: '#1a1a2e', fontSize: 11, padding: '4px 10px',
                                 borderRadius: 6, color: '#9ca3af', display: 'flex', gap: 4, alignItems: 'center',
                                 border: '1px solid rgba(255,255,255,0.06)',

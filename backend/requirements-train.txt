@@ -1,0 +1,18 @@
+# Training-only dependencies for the ML detector. Not needed at runtime —
+# the server needs only requirements.txt (scikit-learn, onnxruntime, tokenizers).
+#   pip install -r requirements-train.txt
+#   python fetch_datasets.py && python train_detector.py
+#   python train_transformer.py
+-r requirements.txt
+datasets>=2.18.0
+pandas>=2.0.0
+pyarrow>=14.0.0
+
+# train_transformer.py: fine-tuning on CPU, ONNX export and int8 quantization.
+# The extra index serves the CPU-only torch wheel (~200 MB) instead of the
+# multi-GB CUDA build from PyPI.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.2
+transformers>=4.40
+onnx>=1.16
+huggingface_hub>=0.23

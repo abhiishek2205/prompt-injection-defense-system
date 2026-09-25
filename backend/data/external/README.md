@@ -1,13 +1,28 @@
 # External datasets
 
-Drop downloaded prompt-injection datasets here and `train_detector.py` picks
-them up automatically — no renaming, no config.
+`train_detector.py` trains on every dataset file in this folder, with no
+renaming or config needed.
+
+## Public datasets — use the fetch script
 
 ```bash
 cd backend
+pip install -r requirements-train.txt
+python fetch_datasets.py            # downloads to hf_*.parquet here + ../eval/
 python train_detector.py            # seed corpus + everything in this folder
 python train_detector.py --no-seed  # this folder only
 ```
+
+`fetch_datasets.py` pulls the public sets listed in `SOURCES.md` at pinned
+revisions. Its files (`hf_*.parquet` here, and everything in `../eval/`) are
+gitignored: the pinned revision makes them reproducible, so there is nothing
+to gain from committing them. Test splits go to `../eval/` and are only ever
+reported on.
+
+## Your own files — drop them in
+
+Anything else placed here is picked up the same way. The rest of this page is
+about those.
 
 ## Formats
 
@@ -64,8 +79,10 @@ benign text, the class balance will look fine and precision will still fall.
 
 `evaluation.py`'s cases and the held-out prompts in
 `tests/test_generalization.py` are never training data. `train_detector.py`
-refuses to run if any appear here, and `tests/test_ml_detector.py` checks
-again. If the guard fires, remove the offending rows — do not disable it. A
+refuses to run if any appear in a file you added, and
+`tests/test_ml_detector.py` checks again. (Files from `fetch_datasets.py` are
+the exception: a public set that happens to share a common phrase such as
+"Debug mode" has that row dropped and listed instead.) If the guard fires, remove the offending rows — do not disable it. A
 model trained on its own test set reports a number that means nothing.
 
 Exact duplicates are caught automatically. Near-duplicates (a reworded version

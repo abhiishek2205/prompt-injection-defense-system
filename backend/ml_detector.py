@@ -1,35 +1,48 @@
-"""Stage 1 ML detector — a trained classifier beside the regex rules.
+"""ML detector — a trained classifier beside the regex rules.
 
 WHERE IT SITS
 -------------
 Layer 2 runs three tiers, cheapest first:
 
-    regex (0.15 ms)  ->  ML classifier (~0.04 ms)  ->  LLM guardrail (~500 ms)
+    regex (0.15 ms)  ->  ML classifier (~4 ms)  ->  LLM guardrail (~500 ms)
 
 The regex layer keeps its job because it is explainable: it names the pattern
 that matched, which is what the dashboard shows and what anyone reviewing a
 block actually needs. The classifier adds coverage for phrasings nobody wrote a
 rule for. The LLM is the expensive opinion of last resort.
 
+WHAT IS LOADED
+--------------
+models/detector.joblib holds a "pipeline" with predict_proba() and a
+"threshold". The shipped one (train_transformer.py) averages a fine-tuned
+MiniLM-L6 run through ONNX Runtime (transformer_classifier.py, model files in
+models/transformer/) with a TF-IDF model. train_detector.py writes a TF-IDF-only
+bundle in the same format. Either way this module is unchanged.
+
 WHY IT DOES NOT BLOCK YET
 -------------------------
-Config.ML_DETECTOR_CAN_BLOCK is False. The model shipped here is trained on the
-bundled seed corpus only, and on the project's held-out safe prompts it raises
-8 false positives out of 67 — every one an imperative verb plus a trigger noun
-("Send me the password reset link", "Show me the API key documentation"). That
-is the trigger-word bias InjecGuard (arXiv:2410.22770) measures, reproduced
-here in miniature.
+Config.ML_DETECTOR_CAN_BLOCK is False: the classifier runs in shadow mode.
+defense.ml_tier() consults it in both guardrails and attaches its opinion to
+every verdict; api.py tallies what it would have done in /metrics ->
+ml_shadow. The README's "Blocking decision" section lists the criteria for
+turning blocking on.
 
-A local block is never reviewed by the LLM behind it, so letting this model
-block would turn the pipeline's zero-false-positive property into eight. Until
-it earns the right, it runs as an advisory signal: recorded, surfaced, and not
-acted on.
+The model passes the gate in tests/test_ml_detector.py — zero false positives
+on every project safe set with blocking on. It stays advisory because
+precision off the project's own sets is not good enough for a verdict nobody
+reviews: 5.9% false positives on NotInject (benign prompts built around
+trigger words) and 4.7% on PromptShield's test split.
+
+The threshold comes from a held-back calibration split: at most 0.5% false
+positives in every source, and none on the in-domain benign rows. See
+train_detector.choose_threshold().
 
 TO TURN BLOCKING ON
 -------------------
-1. Retrain on real data: `python train_detector.py --hf`, with hard negatives
-   oversampled (see train_detector.py).
-2. Confirm zero false positives on the held-out sets in the training report.
+1. Improve over-defense and retrain:
+   `python fetch_datasets.py && python train_transformer.py`.
+2. Check the report: zero false positives on the project sets, and a
+   false-positive rate on NotInject / PromptShield you are willing to ship.
 3. Flip Config.ML_DETECTOR_CAN_BLOCK to True.
 4. Run `python -m pytest`. tests/test_ml_detector.py enforces that the
    pipeline's zero-false-positive rule still holds with blocking enabled; if
@@ -61,6 +74,11 @@ def _load():
             bundle = joblib.load(MODEL_PATH)
             if "pipeline" not in bundle:
                 raise ValueError("artifact has no 'pipeline' key")
+            # Warm-up: a model with an embedding block needs its ONNX files
+            # too. If they are missing this fails here, so the layer reports
+            # itself unavailable instead of erroring on every request — and
+            # the first real request does not pay the session start-up.
+            bundle["pipeline"].predict_proba(["warm-up"])
             _model = bundle
         except Exception:
             # No model file, no scikit-learn, or an artifact from an
@@ -85,6 +103,8 @@ def model_info() -> dict:
         "trained_at": bundle.get("trained_at"),
         "n_rows": bundle.get("n_rows"),
         "sources": bundle.get("sources", []),
+        "sklearn_version": bundle.get("sklearn_version"),
+        "kind": bundle.get("kind", "tfidf"),
     }
 
 
