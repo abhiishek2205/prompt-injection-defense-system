@@ -29,7 +29,7 @@ User Input
 │
 ▼
 ┌─────────────────────────────┐
-│  LAYER 2 — Detection        │  69 weighted regex patterns +
+│  LAYER 2 — Detection        │  76 weighted regex patterns +
 │                             │  Groq LLM sandwich defense
 └─────────────────────────────┘
 │
@@ -262,7 +262,7 @@ receives the original text, so legitimate prompts are never corrupted.
 
 Cheapest first: `regex (0.15 ms) → ML classifier (~4 ms) → LLM (~500 ms)`.
 
-- **Local pattern detector**: 69 weighted regex patterns (0.65–0.95 confidence scores), matched against the raw input and its de-obfuscated variants. Fires instantly with no API call (~0.15 ms per prompt). Kept as tier 1 because it is explainable — it names the pattern that matched.
+- **Local pattern detector**: 76 weighted regex patterns (0.65–0.95 confidence scores), matched against the raw input and its de-obfuscated variants. Fires instantly with no API call (~0.15 ms per prompt). Kept as tier 1 because it is explainable — it names the pattern that matched. A match is final, so the patterns are tuned for precision on outside data too — see **Regex tier precision** below.
 - **ML classifier** *(advisory, shadow mode)*: a fine-tuned MiniLM-L6 transformer (ONNX, int8) averaged with a TF-IDF model whose character n-grams pick up obfuscation (`1gn0r3`, `I.g.n.o.r.e`). Runs in both the Groq and Gemini paths; its score is shown on every message and tallied in `/metrics`. See **ML Detector** below.
 - **Sandwich defense**: Wraps user input in XML tags with hardened top+bottom instructions. Sends to Groq Llama-3.3-70B for semantic analysis.
 - **Threat scoring**: Session-level score increments on each attack, decays on safe messages. Boosts confidence for repeat offenders.
@@ -386,11 +386,12 @@ What this shows:
 - **Recall on the project's own attack sets is below the seed-only model's**
   (78% → 55%). Those sets were written in the same style as the generated seed
   corpus, which gave that model a home advantage. Regex catches all of them.
-- **The regex tier does not generalize.** It is perfect on the sets it was
-  written against, but flags 27.6% of jackhhao's benign prompts, 15.6% of
-  PromptShield's, 4.1% of NotInject — and 28 of the 427 generated hard-negative
-  questions (*"Act as a Spanish tutor…"*, *"How do I enable debug mode in
-  Flask?"*). Off its home turf the ML tier is the more precise of the two.
+- **The regex tier did not generalize** (at the time of this table). It was
+  perfect on the sets it was written against, but flagged 27.6% of jackhhao's
+  benign prompts, 15.6% of PromptShield's, 4.1% of NotInject — and 28 of the
+  427 generated hard-negative questions (*"Act as a Spanish tutor…"*, *"How do
+  I enable debug mode in Flask?"*). It has since been tightened — see **Regex
+  tier precision** — and the "Regex" columns here predate that.
 - **TF-IDF is the ceiling.** PromptShield's AUC of 0.74 (its test split comes
   from sources the training split does not cover) is what a stronger model has
   to fix.
@@ -471,9 +472,10 @@ every verdict, whichever tier decided.
 **Why off.** The committed model passes the gate — zero false positives on
 every project safe set with blocking on, which `tests/test_ml_detector.py`
 requires of any committed model. But a local block is final (the LLM tier
-never reviews it), and blocking would add false positives on top of the regex
-tier's: NotInject 14 → 33 of 339 (+5.6 points), PromptShield 15.6% → 19.3%
-(+3.7 points).
+never reviews it), and blocking would add false positives on top of the
+(tightened) regex tier's: NotInject 1.2% → 6.8% (+5.6 points), PromptShield
+0.2% → 4.9% (+4.7 points). With the regex tier now precise, the classifier
+would be the main source of false positives if it blocked.
 
 **Shadow mode.** Offline sets cannot say what real traffic looks like, so the
 API records what the classifier *would* have done next to what the pipeline
@@ -511,8 +513,9 @@ over-defense effect measured by [InjecGuard](https://arxiv.org/abs/2410.22770).
 
 **Known difference between the paths.** The Groq path runs regex → ML → LLM.
 The Gemini path runs ML → LLM and uses regex only as a fallback when the LLM
-call fails. Moving regex first there would make its false positives (27.6% of
-jackhhao's benign prompts) final in the Gemini path too, so it is left as is.
+call fails. That was kept while the regex tier flagged 27.6% of jackhhao's
+benign prompts; since the tightening that is 0.8%, so moving regex first in the
+Gemini path is now reasonable — left for a separate change.
 
 ### Test sets are never training data
 
@@ -523,6 +526,60 @@ The external test splits in `data/eval/` are reserved the same way: training
 rows that appear in any of them are dropped before training.
 
 ---
+
+## 🎯 Regex tier precision
+
+A regex match is final — `security_guardrail_groq` returns on the first local
+match, so the LLM tier never gets to overturn it. The patterns scored 116/116
+on `evaluation.py` (they were written against it) but over-flagged benign
+prompts everywhere else. They were tightened using only the public
+**training** splits and `data/hard_negatives.jsonl` as development data; the
+test splits in `data/eval/` were used for the report below, and no prompt from
+them was copied into a pattern.
+
+**False positives by the pattern that decided them** (public test splits):
+
+| Pattern | Before | After | Change |
+|---|---:|---:|---|
+| prompt longer than 150 words | 2,570 | 0 | no longer a verdict — a `length_anomaly` note for the tiers behind |
+| persona phrases: `act as a/an/if` (38), `pretend to be / you are` (23), `roleplay as` (6) | 67 | 3 | count only with a no-rules or disclosure cue within 300 characters |
+| credential dump (`show … key/secret/…`) | 17 | 8 | word boundary (not "**key**board"), idioms ("the secret **to**…"), the user's own ("the password **I typed**") |
+| `remember when / you said / you promised` | 10 | 1 | only a claimed agreement: "you said you **would**…", "you promised **to**…" |
+| `jailbreak` | 9 | 0 | only when aimed at or describing the assistant, or the whole message |
+| `locked out` | 1 | 0 | first person only ("I'm locked out…"), not stories |
+| `debug mode`, `maintenance mode` | 0 | 0 | only a toggle aimed at the assistant — not "enable debug mode **in Flask**" (these were hard-negative false positives) |
+| new: persona-jailbreak markers | — | 9 | "an AI that can do anything", "never refuse a request", "uncensored assistant", "stay in character" + a rules cue |
+| everything else (e.g. `you are now` 8 → 8) | 26 | 25 | unchanged |
+
+**Per set:**
+
+| Test split | FP before | FP after | Regex recall before | after |
+|---|---|---|---|---|
+| jackhhao | 34 / 123 (27.6%) | **1 (0.8%)** | 79.1% | 66.2% |
+| PromptShield | 2,651 / 17,030 (15.6%) | **41 (0.2%)** | 48.0% | 19.0% |
+| NotInject (benign only) | 14 / 339 (4.1%) | **4 (1.2%)** | — | — |
+| S-Labs | 1 / 1,050 (0.1%) | 0 | 5.9% | 6.6% |
+| deepset | 0 / 56 | 0 | 5.0% | 0.0% |
+| gandalf (attacks only) | — | — | 58.0% | 57.1% |
+| **All test splits** | **2,700 / 18,598 (14.5%)** | **46 (0.2%)** | **42.7%** | **18.6%** |
+| `data/hard_negatives.jsonl` | 84 rows (28 questions) | **0** | — | — |
+
+**The recall cost is real, and almost all of it is the length rule.** Of 1,914
+attacks the regex tier no longer blocks, 1,899 were caught only for being over
+150 words — a rule that also blocked 2,570 benign prompts. 15 were lost to the
+tightened persona / `locked out` / `jailbreak` patterns (including deepset's
+3), and the new jailbreak markers catch 20 the old patterns did not. Those
+prompts are not waved through: in the Groq path they now reach the ML and LLM
+tiers instead of stopping at a coin-flip verdict. With the shipped ML model
+counted in, recall on PromptShield's test split is 27.6% and on jackhhao's
+89.2%, at 4.9% and 0.8% false positives.
+
+The project's own sets are unchanged: 116/116 on `evaluation.py` with zero
+false positives, and every held-out prompt in `tests/test_generalization.py`
+still behaves as before. `tests/test_defense.py` now also asserts that the
+regex flags no row of `data/hard_negatives.jsonl`, pins benign and attack
+forms for each tightened pattern, and checks that long prompts are noted, not
+blocked.
 
 ## 📊 Evaluation
 
