@@ -212,6 +212,7 @@ prompt-injection-defense-system/
 │   ├── train_detector.py        # Trains it; reports on every held-out set
 │   ├── fetch_datasets.py        # Downloads public datasets (pinned revisions)
 │   ├── build_seed_corpus.py     # Generates the bundled seed corpus
+│   ├── build_hard_negatives.py  # Generates benign prompts using attack words
 │   ├── app.py                   # Original Streamlit UI (legacy)
 │   ├── requirements.txt         # Runtime dependencies
 │   ├── requirements-dev.txt     # Test-only dependencies
@@ -286,7 +287,8 @@ recorded, but it cannot block.
 cd backend
 pip install -r requirements-train.txt    # runtime deps + datasets/pandas
 python fetch_datasets.py                 # download public datasets (~32k rows)
-python train_detector.py                 # train on seed corpus + public data
+python build_hard_negatives.py           # (regenerate data/hard_negatives.jsonl)
+python train_detector.py                 # seed + hard negatives + public data
 python build_seed_corpus.py              # (regenerate the bundled corpus)
 ```
 
@@ -294,6 +296,22 @@ python build_seed_corpus.py              # (regenerate the bundled corpus)
 pinned revisions: training splits to `data/external/`, test splits to
 `data/eval/`, which are reported on and never trained on. Sources, licences
 and what was left out are in `data/external/SOURCES.md`.
+
+### Training data
+
+| Source | Rows | Role |
+|---|---:|---|
+| Public datasets (`fetch_datasets.py`) | ~31,900 | attacks + mostly generic benign |
+| Generated hard negatives (`build_hard_negatives.py`) | 1,183 | benign prompts using attack vocabulary |
+| Seed corpus (`build_seed_corpus.py`) | 259 | project-style attacks and questions |
+
+**Hard negatives** are legitimate prompts carrying the words attacks use:
+*"How do I ignore a file in git?"*, *"Act as an interviewer and ask me Python
+questions"*, *"How do I write a good system prompt for my chatbot?"*, *"How do
+I kill the process on port 3000?"*. They come from templates covering eleven
+trigger concepts plus a multilingual slice, and are written from the trigger
+vocabulary — not from any test set. Before them, the model flagged 18% of the
+"ignore" questions at a 0.5 cut-off.
 
 ### How the threshold is chosen
 
@@ -309,51 +327,69 @@ those scores, then refits on all rows. The threshold is the stricter of:
 2. **Zero false positives on the in-domain benign rows** — the seed corpus's
    IT-support and security questions, the traffic this dashboard actually sees.
 
-Test sets play no part in it. The current model lands on **0.94**.
+Cross-validation is **grouped** — generated variants of one question
+(*"…? Thanks!"*, *"Quick question: …"*) stay in the same fold — and
+**repeated 3 times** with different fold assignments, taking the median
+threshold. A single run is not enough: a 0.5% budget on a source with ~500
+benign rows allows 2 false positives, and the threshold moved between 0.91 and
+0.94 on fold assignment alone.
+
+Test sets play no part in it. The current model lands on **0.93**
+(repeats: 0.91, 0.93, 0.95).
 
 ### Results
 
 The report scores each held-out set three ways: ML alone, regex alone, and
 regex + ML (the pipeline if ML were allowed to block).
 
-| Held-out set | ML (seed only, old) | ML (public data, now) | Regex | Regex + ML |
-|---|---|---|---|---|
-| `evaluation.py` (116) — recall / FP | 78% / 0 | 52% / 0 | 100% / 0 | 100% / 0 |
-| Held-out safe (67) — FP | **8** | **0** | 0 | 0 |
-| Held-out attacks (14) — recall | 93% | 64% | 100% | 100% |
-| NotInject (339 benign, trigger words) — FP | 34 (10.0%) | 3 (0.9%) | 14 (4.1%) | 16 (4.7%) |
-| deepset test — recall · AUC | 28% · 0.76 | 15% · 0.96 | 5% | 20% |
-| jackhhao test — recall / FPR · AUC | 45% / 22.8% · 0.69 | 83% / 0% · 0.98 | 79% / 27.6% | 94% / 27.6% |
-| S-Labs test — recall / FPR | 51% / 0.3% | 51% / 0.1% | 6% / 0.1% | 52% / 0.2% |
-| PromptShield test — recall / FPR · AUC | 11% / 4.4% · 0.65 | 8% / 3.1% · 0.74 | 48% / 15.6% | 50% / 18.2% |
+| Held-out set | ML: seed only | ML: + public data | ML: + hard negatives (now) | Regex | Regex + ML (now) |
+|---|---|---|---|---|---|
+| `evaluation.py` (116) — recall / FP | 78% / 0 | 52% / 0 | 55% / 0 | 100% / 0 | 100% / 0 |
+| Held-out safe (67) — FP | **8** | **0** | **0** | 0 | 0 |
+| Held-out attacks (14) — recall | 93% | 64% | 71% | 100% | 100% |
+| NotInject (339 benign, trigger words) — FP | 34 (10.0%) | 3 (0.9%) | 7 (2.1%) | 14 (4.1%) | 20 (5.9%) |
+| deepset test — recall · AUC | 28% · 0.76 | 15% · 0.96 | 17% · 0.96 | 5% | 22% |
+| gandalf test — recall | 91% | 83% | 85% | 58% | 86% |
+| jackhhao test — recall / FPR · AUC | 45% / 22.8% · 0.69 | 83% / 0% · 0.98 | 84% / 0% · 0.98 | 79% / 27.6% | 94% / 27.6% |
+| S-Labs test — recall / FPR | 51% / 0.3% | 51% / 0.1% | 53% / 0.1% | 6% / 0.1% | 54% / 0.2% |
+| PromptShield test — recall / FPR · AUC | 11% / 4.4% · 0.65 | 8% / 3.1% · 0.74 | 9% / 3.6% · 0.74 | 48% / 15.6% | 51% / 18.7% |
 
 Artifact 3.6 MB (min_df=2, 100k features per vectorizer), 0.06 ms/prompt.
 
 What this shows:
 
-- **Public data fixed the trigger-word bias.** Held-out safe false positives
-  8 → 0, NotInject 10% → 0.9%, jackhhao false-positive rate 22.8% → 0%.
-- **Recall on the project's own attack sets fell** (78% → 52%). Those sets
-  were written in the same style as the generated seed corpus, which gave the
-  old model a home advantage. Regex catches all of them, so the combined
-  pipeline stays at 100%.
+- **Public data fixed the trigger-word bias** of the seed-only model: held-out
+  safe false positives 8 → 0, NotInject 10% → 0.9%, jackhhao 22.8% → 0%.
+- **Hard negatives raised recall on every attack set** (evaluation.py 52% → 55%,
+  held-out attacks 64% → 71%, S-Labs 51% → 53%) — **but did not carry over to
+  NotInject.** An ablation under the same repeated-CV rule isolates it: without
+  them the threshold is 0.95 and NotInject has 2 false positives; with them,
+  0.93 and 7. Scored at one fixed threshold, the two models are level on
+  NotInject, so the difference is the lower threshold the hard negatives allow,
+  not worse judgement. The templates match this project's IT-support phrasing;
+  NotInject is general-purpose and multilingual. They stay in, because the
+  dashboard's traffic is the former — but more diverse hard negatives, or a
+  stronger model, are needed for the latter.
+- **Recall on the project's own attack sets is below the seed-only model's**
+  (78% → 55%). Those sets were written in the same style as the generated seed
+  corpus, which gave that model a home advantage. Regex catches all of them.
 - **The regex tier does not generalize.** It is perfect on the sets it was
   written against, but flags 27.6% of jackhhao's benign prompts, 15.6% of
-  PromptShield's and 4.1% of NotInject. Off its home turf the ML tier is the
-  more precise of the two.
-- **TF-IDF is the ceiling now, not the threshold.** 0.94 is close to the old
-  0.95 cap, so the threshold was not the main loss. PromptShield's AUC of 0.74
-  (its test split comes from sources the training split does not cover) is
-  what a stronger model has to fix.
+  PromptShield's, 4.1% of NotInject — and 28 of the 427 generated hard-negative
+  questions (*"Act as a Spanish tutor…"*, *"How do I enable debug mode in
+  Flask?"*). Off its home turf the ML tier is the more precise of the two.
+- **TF-IDF is the ceiling.** PromptShield's AUC of 0.74 (its test split comes
+  from sources the training split does not cover) is what a stronger model has
+  to fix.
 
 ### Why it does not block yet
 
 `Config.ML_DETECTOR_CAN_BLOCK` is `False`. The committed model passes the gate —
 zero false positives on every project safe set with blocking on, which
 `tests/test_ml_detector.py` now requires of any committed model — but a local
-block is never reviewed by the LLM tier, and 0.9% false positives on NotInject
-and 3.1% on PromptShield are too many for an unreviewed verdict. With recall
-at 52% where regex already catches everything, blocking would add little.
+block is never reviewed by the LLM tier, and 2.1% false positives on NotInject
+and 3.6% on PromptShield are too many for an unreviewed verdict. With recall
+at 55% where regex already catches everything, blocking would add little.
 
 The first model's failure is worth keeping in mind: trained on the seed corpus
 alone it flagged *"Show me the API key documentation"* and *"Send me the

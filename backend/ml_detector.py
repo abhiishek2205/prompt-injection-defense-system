@@ -23,14 +23,14 @@ positives on every project safe set, so it passes the gate in
 tests/test_ml_detector.py.
 
 It stays advisory because precision off the project's own sets is not yet
-good enough for a verdict nobody reviews: 0.9% false positives on NotInject
-(benign prompts built around trigger words) and 3.1% on PromptShield's test
-split. Recall is also modest — 52% on evaluation.py, where regex already
+good enough for a verdict nobody reviews: 2.1% false positives on NotInject
+(benign prompts built around trigger words) and 3.6% on PromptShield's test
+split. Recall is also modest — 55% on evaluation.py, where regex already
 catches everything — so today blocking would add little and risk a lot.
 
-The threshold comes from out-of-fold scores on the training data: at most
-0.5% false positives in every source, and none on the in-domain benign rows.
-See train_detector.choose_threshold().
+The threshold comes from repeated, grouped out-of-fold scores on the training
+data: at most 0.5% false positives in every source, and none on the in-domain
+benign rows. See train_detector.choose_threshold().
 
 TO TURN BLOCKING ON
 -------------------

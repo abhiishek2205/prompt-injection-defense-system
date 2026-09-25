@@ -20,10 +20,12 @@ into data/eval/. See that file for what is included, what is left out, and why.
 The bundled data/seed_corpus.jsonl (build_seed_corpus.py) is still mixed in by
 default; on its own it is a scaffold, not a research result.
 
-Whatever the source, oversample HARD NEGATIVES: legitimate security and IT
-questions containing attack vocabulary. Public sets pair attacks against
-generic benign chat, and a model trained on that learns "mentions passwords ->
-attack" — the trigger-word bias measured by InjecGuard (arXiv:2410.22770).
+Whatever the source, include HARD NEGATIVES: legitimate prompts containing
+attack vocabulary. Public sets pair attacks against generic benign chat, and a
+model trained on that learns "mentions passwords -> attack" — the trigger-word
+bias measured by InjecGuard (arXiv:2410.22770). data/hard_negatives.jsonl
+(build_hard_negatives.py) is loaded by default; --no-hard-negatives leaves it
+out for comparison.
 
 THE TEST SETS ARE NOT TRAINING DATA
 -----------------------------------
@@ -48,6 +50,7 @@ Usage:
     python train_detector.py                # seed corpus + data/external/
     python train_detector.py --hf           # fetch anything missing, then train
     python train_detector.py --no-seed      # data/external/ only
+    python train_detector.py --no-hard-negatives   # ablation
     python train_detector.py --out models/detector.joblib
 """
 
@@ -70,11 +73,12 @@ import fetch_datasets
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import StratifiedKFold, cross_val_predict
+from sklearn.model_selection import StratifiedGroupKFold, cross_val_predict
 from sklearn.pipeline import FeatureUnion, Pipeline
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SEED_CORPUS = os.path.join(HERE, "data", "seed_corpus.jsonl")
+HARD_NEGATIVES = os.path.join(HERE, "data", "hard_negatives.jsonl")
 EXTERNAL_DIR = os.path.join(HERE, "data", "external")
 EVAL_DIR = os.path.join(HERE, "data", "eval")
 
@@ -98,6 +102,7 @@ RANDOM_STATE = 20260921
 
 # Threshold selection — see choose_threshold().
 CV_FOLDS = 5
+CV_REPEATS = 3                  # fold assignments; the threshold is their median
 DEFAULT_TARGET_FPR = 0.005      # per source, on out-of-fold scores
 MIN_BENIGN_FOR_BUDGET = 20      # smaller sources are too noisy to budget
 IN_DOMAIN_PREFIX = "seed/"      # benign rows here must never be flagged
@@ -119,9 +124,9 @@ def _normalize(text):
 # Data
 # =============================================================================
 
-def load_seed():
+def load_seed(path=SEED_CORPUS):
     rows = []
-    with open(SEED_CORPUS, encoding="utf-8") as fh:
+    with open(path, encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
             if line:
@@ -359,18 +364,25 @@ def build_pipeline():
     ])
 
 
-def out_of_fold_scores(texts, labels):
+def out_of_fold_scores(texts, labels, groups=None, seed=RANDOM_STATE):
     """Score every training row with a model that never saw it.
 
     5-fold cross-validation: each row is scored by the model trained on the
     other four folds. Unlike a single 75/25 split, every row counts towards
     the threshold, and nothing is thrown away — the final model is refit on
     all of it afterwards.
+
+    Grouped: rows sharing a group (the generated hard negatives that differ
+    only by "Thanks!" or "Quick question:") stay in one fold. Otherwise one
+    variant is trained on and its twin scored, and that source looks better
+    than it is. Rows without a group are their own group.
     """
-    folds = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True,
-                            random_state=RANDOM_STATE)
-    return cross_val_predict(build_pipeline(), texts, labels, cv=folds,
-                             method="predict_proba",
+    if groups is None:
+        groups = list(range(len(texts)))
+    folds = StratifiedGroupKFold(n_splits=CV_FOLDS, shuffle=True,
+                                 random_state=seed)
+    return cross_val_predict(build_pipeline(), texts, labels, groups=groups,
+                             cv=folds, method="predict_proba",
                              n_jobs=min(CV_FOLDS, os.cpu_count() or 1))[:, 1]
 
 
@@ -507,6 +519,10 @@ def main():
     ap.add_argument("--no-seed", action="store_true",
                     help="skip the bundled seed corpus and train on "
                          "data/external/ alone")
+    ap.add_argument("--cv-repeats", type=int, default=CV_REPEATS,
+                    help=f"cross-validation repeats (default {CV_REPEATS})")
+    ap.add_argument("--no-hard-negatives", action="store_true",
+                    help="leave out data/hard_negatives.jsonl (for ablation)")
     ap.add_argument("--out", default=DEFAULT_OUT)
     ap.add_argument("--target-fpr", type=float, default=DEFAULT_TARGET_FPR,
                     help="false-positive budget per source on out-of-fold "
@@ -523,6 +539,11 @@ def main():
     if not args.no_seed:
         rows += load_seed()
         print(f"  seed corpus: {len(rows)} rows")
+    if not args.no_hard_negatives and os.path.exists(HARD_NEGATIVES):
+        hard = load_seed(HARD_NEGATIVES)
+        rows += hard
+        print(f"  generated hard negatives: {len(hard)} rows "
+              f"(build_hard_negatives.py)")
     rows += load_local()
 
     forbidden = held_out_texts()
@@ -542,22 +563,40 @@ def main():
         print("  ! very small corpus — treat every number below as provisional")
 
     sources = [r.get("source", "unknown") for r in rows]
+    groups = [r.get("group") or f"row:{i}" for i, r in enumerate(rows)]
 
-    print(f"\nCross-validation ({CV_FOLDS}-fold, out-of-fold scores)")
+    # Repeated, because one fold assignment is not enough. A 0.5% budget on a
+    # source with ~500 benign rows allows 2 false positives, so its threshold
+    # rests on the 2nd-3rd highest score and moved 0.91-0.94 between fold
+    # assignments alone. The median over repeats is stable; the spread is
+    # reported so the noise stays visible.
+    repeats = max(1, args.cv_repeats)
+    print(f"\nCross-validation ({CV_FOLDS}-fold x {repeats}, out-of-fold scores)")
     started = time.perf_counter()
-    oof = out_of_fold_scores(texts, labels)
-    print(f"  done in {time.perf_counter() - started:.1f}s   "
-          f"AUC {roc_auc_score(labels, oof):.4f}")
+    runs = []
+    for r in range(repeats):
+        scores = out_of_fold_scores(texts, labels, groups, seed=RANDOM_STATE + r)
+        t, d = choose_threshold(scores, labels, sources, args.target_fpr)
+        runs.append((scores, t, d))
+        print(f"  repeat {r + 1}: AUC {roc_auc_score(labels, scores):.4f}  "
+              f"threshold {t}  (budget {d['budget']:.3f}, "
+              f"in-domain guard {d['in_domain_guard']:.3f})")
+    print(f"  done in {time.perf_counter() - started:.1f}s")
 
-    threshold, detail = choose_threshold(oof, labels, sources, args.target_fpr)
-    print(f"  block threshold: {threshold}")
-    print(f"    FP budget {args.target_fpr:.1%} per source  -> {detail['budget']:.3f}")
-    print(f"    zero FP on in-domain benign -> {detail['in_domain_guard']:.3f}")
+    thresholds = sorted(t for _, t, _ in runs)
+    threshold = float(np.median(thresholds))
+    threshold = math.ceil(threshold * 100 - 1e-9) / 100
+    oof = np.mean([s for s, _, _ in runs], axis=0)
+    detail = {"target_fpr": args.target_fpr, "repeats": repeats,
+              "thresholds": thresholds,
+              "per_repeat": [d for _, _, d in runs]}
+    print(f"  block threshold: {threshold}  (median of {thresholds}; "
+          f"FP budget {args.target_fpr:.1%} per source, zero FP in-domain)")
     if threshold >= MAX_THRESHOLD:
         print(f"    ! capped at {MAX_THRESHOLD}: the model cannot meet both "
               f"constraints — expect low recall")
 
-    print("\n  per source at this threshold (out-of-fold):")
+    print("\n  per source at this threshold (out-of-fold, mean over repeats):")
     oof_arr, lab_arr, src_arr = np.asarray(oof), np.asarray(labels), np.asarray(sources)
     cv_report = {}
     for source in sorted(set(sources)):
