@@ -33,3 +33,8 @@ backend/.streamlit/secrets.toml
 # Frontend
 node_modules/
 dist/
+
+# Datasets downloaded by backend/fetch_datasets.py. Pinned revisions make them
+# reproducible; re-run the script rather than committing the files.
+backend/data/external/hf_*.parquet
+backend/data/eval/

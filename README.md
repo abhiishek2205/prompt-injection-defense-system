@@ -208,9 +208,14 @@ prompt-injection-defense-system/
 │   ├── defense.py               # 4-layer defense module
 │   ├── target.py                # Vulnerable honeypot LLM (NexusCore)
 │   ├── evaluation.py            # 116 labeled test cases + benchmark runner
+│   ├── ml_detector.py           # Loads and runs the trained classifier
+│   ├── train_detector.py        # Trains it; reports on every held-out set
+│   ├── fetch_datasets.py        # Downloads public datasets (pinned revisions)
+│   ├── build_seed_corpus.py     # Generates the bundled seed corpus
 │   ├── app.py                   # Original Streamlit UI (legacy)
 │   ├── requirements.txt         # Runtime dependencies
 │   ├── requirements-dev.txt     # Test-only dependencies
+│   ├── requirements-train.txt   # Training-only dependencies (datasets, pandas)
 │   ├── pytest.ini               # Test configuration
 │   ├── runtime.txt              # Python version for deployment
 │   ├── Procfile / railway.json  # Railway deployment config
@@ -279,11 +284,16 @@ recorded, but it cannot block.
 
 ```bash
 cd backend
-pip install -r requirements.txt          # includes scikit-learn + joblib
-python build_seed_corpus.py              # regenerate the bundled corpus
-python train_detector.py                 # train on the seed corpus
-python train_detector.py --hf            # ...or add public datasets
+pip install -r requirements-train.txt    # runtime deps + datasets/pandas
+python fetch_datasets.py                 # download public datasets (~32k rows)
+python train_detector.py                 # train on seed corpus + public data
+python build_seed_corpus.py              # (regenerate the bundled corpus)
 ```
+
+`fetch_datasets.py` pulls six permissively licensed Hugging Face datasets at
+pinned revisions: training splits to `data/external/`, test splits to
+`data/eval/`, which are reported on and never trained on. Sources, licences
+and what was left out are in `data/external/SOURCES.md`.
 
 ### Why it does not block yet
 
@@ -311,7 +321,7 @@ pipeline must produce zero false positives, or the suite fails.
 
 ### Turning blocking on
 
-1. Retrain on real data — `python train_detector.py --hf` — oversampling **hard
+1. Retrain on real data — `python fetch_datasets.py && python train_detector.py` — oversampling **hard
    negatives** (legitimate security questions containing attack vocabulary).
    Public sets pair attacks against generic chat, which is what causes the bias
    above. 74% of the bundled corpus's benign half is hard negatives for exactly
@@ -340,6 +350,26 @@ not that the approach generalizes. Retrain on real data before quoting them.
 For comparison, the regex tier scores 116/116 with zero false positives, so the
 classifier does not beat it yet — it is a floor to improve on, and the reason
 Stage 2 (sentence embeddings or a fine-tuned DistilBERT) is worth doing.
+
+### Real-data results (first run)
+
+The same model retrained on the seed corpus plus ~32k public rows. It is not
+the committed artifact yet, because the threshold rule needs fixing first:
+
+| Held-out set | Result |
+|---|---|
+| `evaluation.py` (116 labeled) | 82/116 — FP 0, FN 34 |
+| Held-out safe (67) | 67/67 — **FP 0** (was 8) |
+| Held-out attacks (14) | 10/14 — FN 4 |
+| NotInject (339 benign, trigger words) | FP 3 (0.9%) |
+| PromptShield test (23,516) | recall 5%, FPR 2.4% · AUC 0.72 |
+
+Real data removes the trigger-word false positives. Recall drops because the
+threshold rule ("zero false positives on validation") is pushed to its 0.95
+cap by a handful of noisy public labels. Ranking quality is fine (AUC
+0.94–0.99 on five of six sets). PromptShield's AUC of 0.72 is the real limit
+of TF-IDF: its test split comes from sources the training split does not
+cover.
 
 ---
 
