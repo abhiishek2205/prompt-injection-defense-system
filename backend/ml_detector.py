@@ -21,7 +21,11 @@ bundle in the same format. Either way this module is unchanged.
 
 WHY IT DOES NOT BLOCK YET
 -------------------------
-Config.ML_DETECTOR_CAN_BLOCK is False.
+Config.ML_DETECTOR_CAN_BLOCK is False: the classifier runs in shadow mode.
+defense.ml_tier() consults it in both guardrails and attaches its opinion to
+every verdict; api.py tallies what it would have done in /metrics ->
+ml_shadow. The README's "Blocking decision" section lists the criteria for
+turning blocking on.
 
 The model passes the gate in tests/test_ml_detector.py — zero false positives
 on every project safe set with blocking on. It stays advisory because

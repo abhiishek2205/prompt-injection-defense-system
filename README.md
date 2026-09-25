@@ -263,7 +263,7 @@ receives the original text, so legitimate prompts are never corrupted.
 Cheapest first: `regex (0.15 ms) → ML classifier (~4 ms) → LLM (~500 ms)`.
 
 - **Local pattern detector**: 69 weighted regex patterns (0.65–0.95 confidence scores), matched against the raw input and its de-obfuscated variants. Fires instantly with no API call (~0.15 ms per prompt). Kept as tier 1 because it is explainable — it names the pattern that matched.
-- **ML classifier** *(advisory)*: a fine-tuned MiniLM-L6 transformer (ONNX, int8) averaged with a TF-IDF model whose character n-grams pick up obfuscation (`1gn0r3`, `I.g.n.o.r.e`). See **ML Detector** below.
+- **ML classifier** *(advisory, shadow mode)*: a fine-tuned MiniLM-L6 transformer (ONNX, int8) averaged with a TF-IDF model whose character n-grams pick up obfuscation (`1gn0r3`, `I.g.n.o.r.e`). Runs in both the Groq and Gemini paths; its score is shown on every message and tallied in `/metrics`. See **ML Detector** below.
 - **Sandwich defense**: Wraps user input in XML tags with hardened top+bottom instructions. Sends to Groq Llama-3.3-70B for semantic analysis.
 - **Threat scoring**: Session-level score increments on each attack, decays on safe messages. Boosts confidence for repeat offenders.
 - **Multi-turn detection**: Concatenates last 3 messages to catch payload-splitting attacks.
@@ -461,27 +461,58 @@ the average, with softmax in float64.
   the model 23 MB, TF-IDF 3.5 MB) and ~4 ms per prompt on CPU. PyTorch is
   needed for training only.
 
-### Why it does not block yet
+### Blocking decision: off, in shadow mode
 
-`Config.ML_DETECTOR_CAN_BLOCK` is `False`. The committed model passes the gate —
-zero false positives on every project safe set with blocking on, which
-`tests/test_ml_detector.py` requires of any committed model — but a local
-block is never reviewed by the LLM tier, and 5.9% false positives on NotInject
-and 4.7% on PromptShield are too many for an unreviewed verdict.
+`Config.ML_DETECTOR_CAN_BLOCK` stays `False`. The classifier runs on every
+shielded message, in both guardrails — the Groq path (`test_mode`) and the
+Gemini path, which did not consult it before — and its opinion travels with
+every verdict, whichever tier decided.
+
+**Why off.** The committed model passes the gate — zero false positives on
+every project safe set with blocking on, which `tests/test_ml_detector.py`
+requires of any committed model. But a local block is final (the LLM tier
+never reviews it), and blocking would add false positives on top of the regex
+tier's: NotInject 14 → 33 of 339 (+5.6 points), PromptShield 15.6% → 19.3%
+(+3.7 points).
+
+**Shadow mode.** Offline sets cannot say what real traffic looks like, so the
+API records what the classifier *would* have done next to what the pipeline
+did, in `/metrics` → `ml_shadow`, and the dashboard shows it:
+
+- each message gets a dashed **🤖 ML** pill with the classifier's score —
+  amber when it would flag, grey when not; it never decides the outcome;
+- the top bar's **ML shadow +a / −m** badge: *a* messages the classifier
+  would have blocked that the pipeline let through, *m* the pipeline caught
+  that it would not have. A disagreement is not automatically the
+  classifier's error: *"Act as a Spanish tutor…"* is blocked by a regex false
+  positive and lands in *m*, while the classifier (4%) was right;
+- prompts from the labeled test set are also scored against ground truth
+  (`false_positives` / `false_negatives`).
+
+**Turn blocking on when** all of these hold:
+
+1. Zero false positives on the project's safe sets with blocking on
+   (`python -m pytest` enforces this).
+2. Blocking adds at most **1 point** of false positives over regex alone on
+   NotInject and on PromptShield's test split — the "Regex + ML" column in the
+   training report against the "Regex" column.
+3. In shadow mode on real traffic: `ml_shadow.false_positives` stays at 0, and
+   a review of the *would add* cases finds them to be attacks.
+
+Then set `Config.ML_DETECTOR_CAN_BLOCK = True` and run `python -m pytest`.
+The most promising route to criterion 2 is over-defense training data: hard
+negatives that reach general-purpose and multilingual trigger-word prompts,
+not just IT phrasing, then `python train_transformer.py`.
 
 The first model's failure is worth keeping in mind: trained on the seed corpus
 alone it flagged *"Show me the API key documentation"* and *"Send me the
 password reset link please"* — textbook **trigger-word bias**, the
 over-defense effect measured by [InjecGuard](https://arxiv.org/abs/2410.22770).
 
-### Turning blocking on
-
-1. Improve over-defense — hard negatives that reach general-purpose and
-   multilingual trigger-word prompts, not just IT phrasing — and retrain:
-   `python fetch_datasets.py && python train_transformer.py`.
-2. Check the report: zero false positives on the project sets, and external
-   false-positive rates you are willing to ship.
-3. Set `Config.ML_DETECTOR_CAN_BLOCK = True` and run `python -m pytest`.
+**Known difference between the paths.** The Groq path runs regex → ML → LLM.
+The Gemini path runs ML → LLM and uses regex only as a fallback when the LLM
+call fails. Moving regex first there would make its false positives (27.6% of
+jackhhao's benign prompts) final in the Gemini path too, so it is left as is.
 
 ### Test sets are never training data
 
@@ -594,9 +625,21 @@ Returns current session statistics.
   "avg_latency": 12.4,
   "threat_score": 0.3,
   "threat_level": "GUARDED",
-  "total_queries": 1
+  "total_queries": 1,
+  "ml_shadow": {
+    "can_block": false,
+    "scored": 1,
+    "flagged": 1,
+    "would_add": 0,
+    "missed": 0,
+    "false_positives": 0,
+    "false_negatives": 0
+  }
 }
 ```
+
+`ml_shadow` compares the ML classifier's opinion with the pipeline's verdict
+on shielded messages — see **Blocking decision** above.
 
 `total_queries` counts every `/chat` request, on all paths, and is the
 denominator for `avg_latency`.
