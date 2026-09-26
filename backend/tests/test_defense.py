@@ -272,3 +272,17 @@ def test_long_prompts_are_noted_not_blocked():
     result = local_pattern_detector(long_benign, 0.0)
     assert result["is_malicious"] is False
     assert result.get("length_anomaly") is True
+
+
+# ---------------------------------------------------------------------------
+# LLM settings
+# ---------------------------------------------------------------------------
+
+def test_reasoning_models_get_a_short_thinking_budget():
+    """gpt-oss/Qwen3 think before answering and the thinking counts against
+    max_tokens; without a low effort the guardrail's verdict can come back
+    empty and silently fall back to regex."""
+    import llm_config
+    assert llm_config.groq_extra_body("openai/gpt-oss-120b") == {"reasoning_effort": "low"}
+    assert llm_config.groq_extra_body("qwen/qwen3.8-27b") == {"reasoning_effort": "none"}
+    assert llm_config.groq_extra_body("some-plain-chat-model") is None

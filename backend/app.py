@@ -646,7 +646,7 @@ if prompt:
                     if method == "local_pattern" or method == "groq_local_pattern":
                         st.info("🔎 Caught by Layer 2 regex pattern matching (no API call needed)")
                     elif "groq" in method:
-                        st.info("🤖 Caught by Layer 2 Groq LLM analysis (Llama 3.3-70B)")
+                        st.info("🤖 Caught by Layer 2 Groq LLM analysis")
                     elif "gemini" in method:
                         st.info("🤖 Caught by Layer 2 Gemini LLM analysis")
             

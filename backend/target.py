@@ -34,9 +34,8 @@ from groq import Groq
 groq_client = Groq(api_key=_get_secret("GROQ_API_KEY"))
 
 # Overridable (environment or .streamlit/secrets.toml) because providers
-# retire models; a retired one fails every call with "Target System Unavailable".
-GROQ_MODEL = os.environ.get("GROQ_MODEL") or "llama-3.3-70b-versatile"
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash-lite"
+# retire models — see llm_config.py.
+from llm_config import GEMINI_MODEL, GROQ_MODEL, groq_extra_body
 
 # Built lazily: google.genai raises from the Client constructor when no API key
 # is set, where the old SDK's genai.configure() accepted an empty one. The Groq
@@ -332,7 +331,8 @@ def get_target_response_groq(user_prompt: str) -> str:
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.7,
-            max_tokens=600
+            max_tokens=1500,   # a reasoning model's thinking counts against this
+            extra_body=groq_extra_body(GROQ_MODEL),
         )
         return response.choices[0].message.content
     except Exception as e:

@@ -15,6 +15,8 @@ IMPROVEMENTS ADDED:
 
 import logging
 import os
+
+import llm_config
 from google import genai
 from groq import Groq
 import base64
@@ -111,13 +113,15 @@ class Config:
     """Central configuration for all defense parameters."""
     # LLM Settings
     # Overridable via the environment or .streamlit/secrets.toml, because
-    # providers retire models (see target.py).
-    GEMINI_MODEL = os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash-lite"
-    GROQ_MODEL = os.environ.get("GROQ_MODEL") or "llama-3.3-70b-versatile"
+    # providers retire models — see llm_config.py.
+    GEMINI_MODEL = llm_config.GEMINI_MODEL
+    GROQ_MODEL = llm_config.GROQ_MODEL
     LLM_TEMPERATURE = 0.1
-    LLM_MAX_TOKENS_GUARDRAIL = 200
-    LLM_MAX_TOKENS_REPROMPT = 300
-    LLM_MAX_TOKENS_RECHECK = 150
+    # Maximums, not costs. Sized for a reasoning model's short thinking
+    # plus the JSON answer (see llm_config.groq_extra_body).
+    LLM_MAX_TOKENS_GUARDRAIL = 1000
+    LLM_MAX_TOKENS_REPROMPT = 1000
+    LLM_MAX_TOKENS_RECHECK = 800
     
     # Detection Thresholds
     LOCAL_PATTERN_NO_MATCH_CONFIDENCE = 0.7
@@ -821,7 +825,7 @@ def security_guardrail_groq(sanitized_input: str, chat_history: list = None,
                             threat_score: float = None) -> dict:
     """
     Groq-based security guardrail for test mode (free API).
-    Uses Llama 3 model for fast inference.
+    Uses Config.GROQ_MODEL (openai/gpt-oss-120b by default).
     """
     if chat_history is None:
         chat_history = []
@@ -880,14 +884,15 @@ Reply ONLY with JSON."""
             ],
             temperature=Config.LLM_TEMPERATURE,
             max_tokens=Config.LLM_MAX_TOKENS_GUARDRAIL,
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            extra_body=llm_config.groq_extra_body(Config.GROQ_MODEL),
         )
         
         result = json.loads(response.choices[0].message.content)
         result['is_malicious'] = bool(result.get('is_malicious', False))
         result['confidence'] = float(result.get('confidence', 0.5))
         result['reason'] = str(result.get('reason', 'Unknown'))
-        result['detection_method'] = 'groq_llama3'
+        result['detection_method'] = 'groq_llm'
         return attach_ml_opinion(result, ml_result)
         
     except Exception as e:
@@ -1025,7 +1030,8 @@ Reply with JSON only."""
                 ],
                 temperature=Config.LLM_TEMPERATURE,
                 max_tokens=Config.LLM_MAX_TOKENS_RECHECK,
-                response_format={"type": "json_object"}
+                response_format={"type": "json_object"},
+                extra_body=llm_config.groq_extra_body(Config.GROQ_MODEL),
             )
             result = json.loads(response.choices[0].message.content)
         else:
@@ -1115,7 +1121,8 @@ Respond with JSON only."""
                 ],
                 temperature=Config.LLM_TEMPERATURE,
                 max_tokens=Config.LLM_MAX_TOKENS_REPROMPT,
-                response_format={"type": "json_object"}
+                response_format={"type": "json_object"},
+                extra_body=llm_config.groq_extra_body(Config.GROQ_MODEL),
             )
             result = json.loads(response.choices[0].message.content)
         else:

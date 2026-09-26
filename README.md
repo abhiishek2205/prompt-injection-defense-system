@@ -100,9 +100,12 @@ GROQ_API_KEY = "your-groq-api-key-here"
 - Keys are read at start-up: restart the backend after editing (`--reload`
   only watches `.py` files).
 - The server log names the cause, e.g.
-  `Groq target error (llama-3.3-70b-versatile): AuthenticationError: 401 … Invalid API Key`
-  for a bad key. If it says the model is decommissioned or not found, set
-  `GROQ_MODEL` (or `GEMINI_MODEL`) in `secrets.toml` to a current model name.
+  `Groq target error (openai/gpt-oss-120b): AuthenticationError: 401 … Invalid API Key`
+  for a bad key. `404 … model_not_found` means the provider no longer serves
+  that model to your account (this is what retired the old default,
+  `llama-3.3-70b-versatile`): set `GROQ_MODEL` (or `GEMINI_MODEL`) in
+  `secrets.toml` to a chat model from your provider's model list. Classifier
+  models such as Llama Prompt Guard cannot be used here.
 - At start-up the log also warns about any key that is not set.
 
 ---
@@ -278,7 +281,7 @@ Cheapest first: `regex (0.15 ms) → ML classifier (~4 ms) → LLM (~500 ms)`.
 
 - **Local pattern detector**: 76 weighted regex patterns (0.65–0.95 confidence scores), matched against the raw input and its de-obfuscated variants. Fires instantly with no API call (~0.15 ms per prompt). Kept as tier 1 because it is explainable — it names the pattern that matched. A match is final, so the patterns are tuned for precision on outside data too — see **Regex tier precision** below.
 - **ML classifier** *(advisory, shadow mode)*: a fine-tuned MiniLM-L6 transformer (ONNX, int8) averaged with a TF-IDF model whose character n-grams pick up obfuscation (`1gn0r3`, `I.g.n.o.r.e`). Runs in both the Groq and Gemini paths; its score is shown on every message and tallied in `/metrics`. See **ML Detector** below.
-- **Sandwich defense**: Wraps user input in XML tags with hardened top+bottom instructions. Sends to Groq Llama-3.3-70B for semantic analysis.
+- **Sandwich defense**: Wraps user input in XML tags with hardened top+bottom instructions. Sends to the Groq model (`openai/gpt-oss-120b` by default) for semantic analysis.
 - **Threat scoring**: Session-level score increments on each attack, decays on safe messages. Boosts confidence for repeat offenders.
 - **Multi-turn detection**: Concatenates last 3 messages to catch payload-splitting attacks.
 
@@ -726,7 +729,7 @@ Resets all session counters and chat history.
 
 | | Test Mode (Groq) | Production Mode (Gemini) |
 |-|-----------------|------------------------|
-| Model | Llama-3.3-70B | Gemini 2.5 Flash Lite |
+| Model | `openai/gpt-oss-120b` (set with `GROQ_MODEL`) | Gemini 2.5 Flash Lite (`GEMINI_MODEL`) |
 | Cost | Free | Pay per use |
 | Speed | ~500ms | ~1200ms |
 | Accuracy | High | Higher |
