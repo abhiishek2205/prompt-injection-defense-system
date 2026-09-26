@@ -13,7 +13,10 @@ IMPROVEMENTS ADDED:
 - Prompt length anomaly detection
 """
 
+import logging
 import os
+
+import llm_config
 from google import genai
 from groq import Groq
 import base64
@@ -54,6 +57,17 @@ def _set_session(key, value):
         st.session_state[key] = value
     except Exception:
         pass
+
+
+def _report_error(message):
+    """Log an LLM failure and keep it for the Streamlit UI.
+
+    Every caller degrades gracefully (usually to the local detector), which
+    hides the cause — a bad key, a retired model, a rate limit. The log is
+    where it stays visible.
+    """
+    logging.getLogger("nexuscore.defense").warning(message)
+    _set_session("last_raw_error", message)
 
 
 # Gemini client.
@@ -98,12 +112,16 @@ groq_client = Groq(api_key=_get_secret("GROQ_API_KEY"))
 class Config:
     """Central configuration for all defense parameters."""
     # LLM Settings
-    GEMINI_MODEL = "gemini-2.5-flash-lite"
-    GROQ_MODEL = "llama-3.3-70b-versatile"
+    # Overridable via the environment or .streamlit/secrets.toml, because
+    # providers retire models — see llm_config.py.
+    GEMINI_MODEL = llm_config.GEMINI_MODEL
+    GROQ_MODEL = llm_config.GROQ_MODEL
     LLM_TEMPERATURE = 0.1
-    LLM_MAX_TOKENS_GUARDRAIL = 200
-    LLM_MAX_TOKENS_REPROMPT = 300
-    LLM_MAX_TOKENS_RECHECK = 150
+    # Maximums, not costs. Sized for a reasoning model's short thinking
+    # plus the JSON answer (see llm_config.groq_extra_body).
+    LLM_MAX_TOKENS_GUARDRAIL = 1000
+    LLM_MAX_TOKENS_REPROMPT = 1000
+    LLM_MAX_TOKENS_RECHECK = 800
     
     # Detection Thresholds
     LOCAL_PATTERN_NO_MATCH_CONFIDENCE = 0.7
@@ -675,13 +693,11 @@ Examples:
         return attach_ml_opinion(result, ml_result)
         
     except json.JSONDecodeError as e:
-        _set_session("last_raw_error",
-                     f"🛡️ Defense JSON Parse Error:\n{type(e).__name__}: {str(e)}")
+        _report_error(f"🛡️ Defense JSON Parse Error:\n{type(e).__name__}: {str(e)}")
         return attach_ml_opinion(
             local_pattern_detector(sanitized_input, threat_score), ml_result)
     except Exception as e:
-        _set_session("last_raw_error",
-                     f"🛡️ Defense API Error:\n{type(e).__name__}: {str(e)}")
+        _report_error(f"🛡️ Defense API Error:\n{type(e).__name__}: {str(e)}")
         return attach_ml_opinion(
             local_pattern_detector(sanitized_input, threat_score), ml_result)
 
@@ -809,7 +825,7 @@ def security_guardrail_groq(sanitized_input: str, chat_history: list = None,
                             threat_score: float = None) -> dict:
     """
     Groq-based security guardrail for test mode (free API).
-    Uses Llama 3 model for fast inference.
+    Uses Config.GROQ_MODEL (openai/gpt-oss-120b by default).
     """
     if chat_history is None:
         chat_history = []
@@ -868,19 +884,19 @@ Reply ONLY with JSON."""
             ],
             temperature=Config.LLM_TEMPERATURE,
             max_tokens=Config.LLM_MAX_TOKENS_GUARDRAIL,
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            extra_body=llm_config.groq_extra_body(Config.GROQ_MODEL),
         )
         
         result = json.loads(response.choices[0].message.content)
         result['is_malicious'] = bool(result.get('is_malicious', False))
         result['confidence'] = float(result.get('confidence', 0.5))
         result['reason'] = str(result.get('reason', 'Unknown'))
-        result['detection_method'] = 'groq_llama3'
+        result['detection_method'] = 'groq_llm'
         return attach_ml_opinion(result, ml_result)
         
     except Exception as e:
-        _set_session("last_raw_error",
-                     f"🧪 Groq API Error:\n{type(e).__name__}: {str(e)}")
+        _report_error(f"🧪 Groq API Error:\n{type(e).__name__}: {str(e)}")
         # No API key, or the call failed. Fall back to the regex verdict and
         # carry the classifier's opinion for visibility — it does not override,
         # for the same reason it does not block above.
@@ -1014,7 +1030,8 @@ Reply with JSON only."""
                 ],
                 temperature=Config.LLM_TEMPERATURE,
                 max_tokens=Config.LLM_MAX_TOKENS_RECHECK,
-                response_format={"type": "json_object"}
+                response_format={"type": "json_object"},
+                extra_body=llm_config.groq_extra_body(Config.GROQ_MODEL),
             )
             result = json.loads(response.choices[0].message.content)
         else:
@@ -1104,7 +1121,8 @@ Respond with JSON only."""
                 ],
                 temperature=Config.LLM_TEMPERATURE,
                 max_tokens=Config.LLM_MAX_TOKENS_REPROMPT,
-                response_format={"type": "json_object"}
+                response_format={"type": "json_object"},
+                extra_body=llm_config.groq_extra_body(Config.GROQ_MODEL),
             )
             result = json.loads(response.choices[0].message.content)
         else:
@@ -1135,8 +1153,7 @@ Respond with JSON only."""
         return result
         
     except Exception as e:
-        _set_session("last_raw_error",
-                     f"🔄 Reprompt Error:\n{type(e).__name__}: {str(e)}")
+        _report_error(f"🔄 Reprompt Error:\n{type(e).__name__}: {str(e)}")
         return {
             "can_reprompt": False,
             "reprompted_query": "",

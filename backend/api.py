@@ -16,8 +16,22 @@ if os.path.exists(_secrets_path):
             _secrets.get("GEMINI_API_KEY", ""))
         os.environ.setdefault("GROQ_API_KEY",
             _secrets.get("GROQ_API_KEY", ""))
+        for _name in ("GROQ_MODEL", "GEMINI_MODEL"):
+            if _secrets.get(_name):
+                os.environ.setdefault(_name, _secrets[_name])
     except Exception:
         pass
+
+# Say which keys are missing at start-up (never their values): without them
+# every LLM call degrades to "Target System Unavailable" with no other clue.
+import logging as _logging
+for _key, _mode in (("GROQ_API_KEY", "test mode (Groq)"),
+                    ("GEMINI_API_KEY", "production mode (Gemini)")):
+    if not os.environ.get(_key):
+        _logging.getLogger("nexuscore.api").warning(
+            "%s is not set: %s will answer 'Target System Unavailable'. "
+            "Add it to backend/.streamlit/secrets.toml (not the .example file) "
+            "and restart the server.", _key, _mode)
 
 # Add svnit_ps1 directory to path so defense/target/evaluation are found
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
