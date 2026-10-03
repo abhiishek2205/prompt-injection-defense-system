@@ -104,6 +104,17 @@ const THREAT_COLORS = { LOW: '#22c55e', GUARDED: '#f59e0b', ELEVATED: '#f97316',
 const EMPTY_SHADOW = { scored: 0, flagged: 0, would_add: 0, missed: 0,
                        false_positives: 0, false_negatives: 0, can_block: false }
 
+function memoryBadge(memory) {
+    if (!memory?.available) return null
+    return {
+        label: 'Memory',
+        value: memory.learned ? `${memory.size} (+${memory.learned} learned)` : `${memory.size}`,
+        title: `Attack memory: ${memory.seed} known attacks from the training data, `
+            + `${memory.learned} learned at runtime (canary leaks and LLM blocks). `
+            + `${memory.hits} matched this session; blocks at ${Math.round(memory.threshold * 100)}% similarity.`,
+    }
+}
+
 function shadowBadge(shadow) {
     if (!shadow || !shadow.scored) return null
     return {
@@ -138,7 +149,7 @@ function Toggle({ on, onToggle }) {
 }
 
 // ─── PIPELINE BAR ───────────────────────────────────────────────────────────
-function PipelineBar({ pipeline, ml }) {
+function PipelineBar({ pipeline, ml, memory }) {
     if (!pipeline) return null
     return (
         <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
@@ -155,7 +166,8 @@ function PipelineBar({ pipeline, ml }) {
                     </span>
                 )
             })}
-            <MlPill ml={ml} delay={PIPE_LABELS.length * 150} />
+            <MemoryPill memory={memory} delay={PIPE_LABELS.length * 150} />
+            <MlPill ml={ml} delay={(PIPE_LABELS.length + 1) * 150} />
         </div>
     )
 }
@@ -164,6 +176,28 @@ function PipelineBar({ pipeline, ml }) {
 // The classifier's verdict, shown beside the pipeline. Dashed and amber rather
 // than red: it is advisory (Config.ML_DETECTOR_CAN_BLOCK is off) and did not
 // decide the outcome.
+// ─── ATTACK MEMORY PILL ─────────────────────────────────────────────────────
+// Similarity to the closest known attack. Solid, unlike the ML pill: the
+// memory can block, and red here means it did.
+function MemoryPill({ memory, delay }) {
+    if (!memory?.available) return null
+    const s = memory.is_malicious ? PIPE_STYLES.fail : PIPE_STYLES.skip
+    const pct = Math.round((memory.confidence || 0) * 100)
+    return (
+        <span
+            title={`Attack memory: ${pct}% similar to a known attack`
+                + (memory.matched_source ? ` (${memory.matched_source})` : '')
+                + `; blocks at ${Math.round((memory.threshold || 0) * 100)}%.`}
+            style={{
+                ...s, fontSize: 11, padding: '3px 8px', borderRadius: 6,
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                animation: `pillAppear 0.25s ease ${delay}ms both`,
+            }}>
+            🧠 memory {pct}%{memory.is_malicious ? ' · known attack' : ''}
+        </span>
+    )
+}
+
 function MlPill({ ml, delay }) {
     if (!ml?.available) return null
     const s = ml.is_malicious ? PIPE_STYLES.warn : PIPE_STYLES.skip
@@ -256,7 +290,7 @@ function AssistantMessage({ msg }) {
                     )}
                     <ConfidenceBar confidence={conf} />
                 </div>
-                <PipelineBar pipeline={msg.pipeline} ml={msg.security?.ml_opinion} />
+                <PipelineBar pipeline={msg.pipeline} ml={msg.security?.ml_opinion} memory={msg.security?.memory_opinion} />
             </div>
         )
     }
@@ -292,7 +326,7 @@ function AssistantMessage({ msg }) {
                     )}
                     <div style={{ fontSize: 14, color: '#e0e0e0', lineHeight: 1.6 }}>{msg.content}</div>
                 </div>
-                <PipelineBar pipeline={msg.pipeline} ml={msg.security?.ml_opinion} />
+                <PipelineBar pipeline={msg.pipeline} ml={msg.security?.ml_opinion} memory={msg.security?.memory_opinion} />
             </div>
         )
     }
@@ -310,7 +344,7 @@ function AssistantMessage({ msg }) {
                     </div>
                     <div style={{ fontSize: 14, color: '#e0e0e0', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{msg.content}</div>
                 </div>
-                <PipelineBar pipeline={msg.pipeline} ml={msg.security?.ml_opinion} />
+                <PipelineBar pipeline={msg.pipeline} ml={msg.security?.ml_opinion} memory={msg.security?.memory_opinion} />
             </div>
         )
     }
@@ -333,7 +367,7 @@ function AssistantMessage({ msg }) {
                     {msg.content}
                 </div>
             </div>
-            <PipelineBar pipeline={msg.pipeline} ml={msg.security?.ml_opinion} />
+            <PipelineBar pipeline={msg.pipeline} ml={msg.security?.ml_opinion} memory={msg.security?.memory_opinion} />
         </div>
     )
 }
@@ -642,6 +676,7 @@ export default function App() {
                             { label: 'FP', value: metrics.false_positives },
                             { label: 'FN', value: metrics.false_negatives },
                             { label: 'Latency', value: `${metrics.avg_latency}ms` },
+                            memoryBadge(metrics.attack_memory),
                             shadowBadge(metrics.ml_shadow),
                         ].filter(Boolean).map(b => (
                             <span key={b.label} title={b.title} style={{

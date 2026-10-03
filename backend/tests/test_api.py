@@ -30,6 +30,9 @@ def client(monkeypatch):
                         lambda text, security, use_groq=True:
                         {"can_reprompt": False, "reprompted_query": "",
                          "explanation": "stubbed"})
+    # Learning would write to data/attack_memory/; tests/test_attack_memory.py
+    # covers it against a temporary store.
+    monkeypatch.setattr(api.Config, "ATTACK_MEMORY_LEARN", False)
     api.session.reset()
     yield TestClient(api.app)
     api.session.reset()

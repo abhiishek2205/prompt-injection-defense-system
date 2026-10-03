@@ -51,6 +51,7 @@ from defense import (
     local_pattern_detector,
     ml_opinion,
     attach_ml_opinion,
+    attach_memory_opinion,
     new_canary,
 )
 from target import get_target_response_groq, get_target_response
@@ -141,6 +142,39 @@ def _public_containment(contained: dict) -> dict:
     return {k: v for k, v in contained.items() if k != "original_response"}
 
 
+def _remember_attack(sanitized: str, source: str):
+    """Self-hardening: store a confirmed attack in the attack memory, so its
+    next rewording is caught locally. Best effort — never breaks a request."""
+    if not Config.ATTACK_MEMORY_LEARN:
+        return
+    try:
+        import attack_memory
+        memory = attack_memory.get_memory()
+        if memory is not None:
+            memory.learn(sanitized, source)
+    except Exception as exc:
+        _logging.getLogger("nexuscore.api").warning(
+            "attack memory: could not learn (%s: %s)", type(exc).__name__, exc)
+
+
+def _learn_from_verdict(sanitized: str, security: dict):
+    """Remember attacks the LLM tier blocked with high confidence: the cheap
+    tiers missed them, and next time the memory will not."""
+    if (security.get("is_malicious")
+            and security.get("detection_method") in ("groq_llm", "gemini_llm")
+            and float(security.get("confidence", 0)) >= Config.ATTACK_MEMORY_LEARN_MIN_CONFIDENCE):
+        _remember_attack(sanitized, "llm_block")
+
+
+def _memory_stats() -> dict:
+    try:
+        import attack_memory
+        memory = attack_memory.get_memory()
+        return memory.stats() if memory is not None else {"available": False}
+    except Exception:
+        return {"available": False}
+
+
 def _record_ml_shadow(message: str, security: dict, is_malicious: bool):
     """Count the ML tier's opinion against the pipeline's verdict.
 
@@ -189,12 +223,14 @@ def _detect(req, sanitized):
         except Exception:
             multi = {"is_suspicious": False}
         if multi.get("is_suspicious"):
+            multi_memory = security.get("memory_opinion")
             security = attach_ml_opinion({
                 "is_malicious": True,
                 "reason": multi.get("reason", "Multi-turn attack detected"),
                 "confidence": multi.get("confidence", 0.75),
                 "detection_method": "multi_turn",
             }, security.get("ml_opinion"))
+            security = attach_memory_opinion(security, multi_memory)
     return security
 
 
@@ -213,6 +249,7 @@ def get_metrics():
         "threat_score": round(session.threat_score, 2),
         "threat_level": get_threat_level_local(session.threat_score),
         "total_queries": len(session.eval_latencies),
+        "attack_memory": _memory_stats(),
         "ml_shadow": {
             "can_block": Config.ML_DETECTOR_CAN_BLOCK,
             "scored": session.ml_scored,
@@ -257,6 +294,7 @@ async def chat(req: ChatRequest):
         # 2) Shielded path — full defense pipeline
         sanitized = sanitize_input(req.message)
         security = _detect(req, sanitized)
+        _learn_from_verdict(sanitized, security)
 
         is_malicious = security.get("is_malicious", False)
         _update_threat_score(is_malicious)
@@ -287,6 +325,8 @@ async def chat(req: ChatRequest):
                 except Exception as e:
                     shielded_response = f"Error: {str(e)}"
                 contained = contain_output(shielded_response, canary=canary)
+                if contained["canary_detected"]:
+                    _remember_attack(sanitized, "canary_leak")
                 shielded_pipeline["contain"] = "warn" if contained["is_leaked"] else "pass"
                 shielded_response = contained["filtered_response"]
                 if contained["is_leaked"]:
@@ -306,6 +346,8 @@ async def chat(req: ChatRequest):
             except Exception as e:
                 shielded_response = f"Error: {str(e)}"
             contained = contain_output(shielded_response, canary=canary)
+            if contained["canary_detected"]:
+                _remember_attack(sanitized, "canary_leak")
             shielded_pipeline["contain"] = "warn" if contained["is_leaked"] else "pass"
             shielded_response = contained["filtered_response"]
             if contained["is_leaked"]:
@@ -356,6 +398,7 @@ async def chat(req: ChatRequest):
     # elevated-threat boost reflects the session's prior history; the score is
     # advanced afterwards.
     security = _detect(req, sanitized)
+    _learn_from_verdict(sanitized, security)
 
     is_malicious = security.get("is_malicious", False)
     _update_threat_score(is_malicious)
@@ -385,6 +428,8 @@ async def chat(req: ChatRequest):
                 response = f"Error: {str(e)}"
 
             contained = contain_output(response, canary=canary)
+            if contained["canary_detected"]:
+                _remember_attack(sanitized, "canary_leak")
             pipeline["contain"] = "warn" if contained["is_leaked"] else "pass"
             if contained["is_leaked"]:
                 session.containment_count += 1
@@ -426,6 +471,8 @@ async def chat(req: ChatRequest):
         response = f"Error: {str(e)}"
 
     contained = contain_output(response, canary=canary)
+    if contained["canary_detected"]:
+        _remember_attack(sanitized, "canary_leak")
     pipeline["contain"] = "warn" if contained["is_leaked"] else "pass"
     if contained["is_leaked"]:
         session.containment_count += 1

@@ -112,6 +112,9 @@ def test_no_deprecated_sdk_is_imported():
 # ---------------------------------------------------------------------------
 
 def test_security_guardrail_sends_a_valid_gemini_request(monkeypatch):
+    # The prompt is a known attack; keep the attack memory from answering
+    # before the request this test inspects is sent.
+    monkeypatch.setattr(defense.Config, "ATTACK_MEMORY_ENABLED", False)
     client = FakeClient('{"is_malicious": true, "reason": "override attempt", "confidence": 0.9}')
     monkeypatch.setattr(defense, "_get_secret", lambda key: "test-key")
     monkeypatch.setattr(defense.genai, "Client", lambda api_key: client)
@@ -130,6 +133,7 @@ def test_security_guardrail_sends_a_valid_gemini_request(monkeypatch):
 
 
 def test_guardrail_falls_back_to_local_patterns_when_gemini_fails(monkeypatch):
+    monkeypatch.setattr(defense.Config, "ATTACK_MEMORY_ENABLED", False)
     """A missing key or a dead API must not take the pipeline down."""
     monkeypatch.setattr(defense, "_get_secret", lambda key: "")
 
