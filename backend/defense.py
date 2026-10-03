@@ -15,6 +15,7 @@ IMPROVEMENTS ADDED:
 
 import logging
 import os
+import secrets
 
 import llm_config
 from google import genai
@@ -135,8 +136,9 @@ class Config:
     ELEVATED_THREAT_THRESHOLD = 0.5
     ELEVATED_THREAT_CONFIDENCE_BOOST = 0.1
     
-    # Canary Token (hidden in system prompt — if it appears in output, prompt was leaked)
-    CANARY_TOKEN = "CANARY_X7K9_NEXUS_INTERNAL"
+    # Canary tokens: a fresh one per request (new_canary()), placed in the
+    # target's system prompt; seeing it in a reply proves the prompt leaked.
+    CANARY_PREFIX = "NXC-"
     
     # Chat history context
     CHAT_HISTORY_CONTEXT_SIZE = 5
@@ -1206,7 +1208,18 @@ OUTPUT_LEAK_PATTERNS = [
 COMPILED_OUTPUT_PATTERNS = [re.compile(p, re.IGNORECASE) for p in OUTPUT_LEAK_PATTERNS]
 
 
-def contain_output(response: str) -> dict:
+def new_canary() -> str:
+    """A fresh, unguessable canary token for one request.
+
+    It goes into the target's system prompt (target.system_prompt()) and
+    contain_output() looks for it in the reply. A fixed token would be
+    useless: it sits in this public repository, an attacker can ask the model
+    to omit it, and it cannot tell one leak from another.
+    """
+    return Config.CANARY_PREFIX + secrets.token_hex(8)
+
+
+def contain_output(response: str, canary: str = None) -> dict:
     """
     Scan the target bot's response for potential credential/data leakage.
     This is the OUTPUT-side defense — catching leaks even if input slipped through.
@@ -1217,6 +1230,9 @@ def contain_output(response: str) -> dict:
     
     Args:
         response: The target bot's response text
+        canary: The canary token placed in this request's system prompt
+            (new_canary()). If it appears in the reply, the system prompt
+            leaked. None skips the check.
         
     Returns:
         Dictionary with keys: 
@@ -1227,12 +1243,13 @@ def contain_output(response: str) -> dict:
     leaked_patterns = []
     canary_detected = False
     
-    # NEW: Check for canary token leakage
-    if Config.CANARY_TOKEN.lower() in response.lower():
+    # Canary: this request's token in the reply means the system prompt leaked.
+    canary_re = re.compile(re.escape(canary), re.IGNORECASE) if canary else None
+    if canary_re and canary_re.search(response):
         canary_detected = True
         leaked_patterns.append({
             "pattern_id": -1,
-            "matched_text": Config.CANARY_TOKEN,
+            "matched_text": "[canary token]",
             "pattern": "CANARY_TOKEN (system prompt leaked!)"
         })
     
@@ -1252,7 +1269,7 @@ def contain_output(response: str) -> dict:
         
         # Redact canary token
         if canary_detected:
-            filtered_response = filtered_response.replace(Config.CANARY_TOKEN, '[CANARY-REDACTED]')
+            filtered_response = canary_re.sub('[CANARY-REDACTED]', filtered_response)
         
         # Redact the leaked content
         for pattern in COMPILED_OUTPUT_PATTERNS:
