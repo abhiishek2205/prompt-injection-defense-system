@@ -38,3 +38,6 @@ dist/
 # reproducible; re-run the script rather than committing the files.
 backend/data/external/hf_*.parquet
 backend/data/eval/
+
+# Attacks the attack memory learns at runtime (backend/attack_memory.py).
+backend/data/attack_memory/
