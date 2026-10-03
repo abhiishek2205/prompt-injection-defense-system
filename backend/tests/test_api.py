@@ -19,9 +19,9 @@ import api
 def client(monkeypatch):
     """A client whose target LLM and LLM guardrail never touch the network."""
     monkeypatch.setattr(api, "get_target_response_groq",
-                        lambda prompt: f"stub answer for: {prompt}")
+                        lambda prompt, canary=None: f"stub answer for: {prompt}")
     monkeypatch.setattr(api, "get_target_response",
-                        lambda prompt: f"stub answer for: {prompt}")
+                        lambda prompt, canary=None: f"stub answer for: {prompt}")
     # Fall back to the local detector instead of calling Groq.
     monkeypatch.setattr(api, "security_guardrail_groq",
                         lambda text, history, score=0.0:
@@ -218,3 +218,31 @@ def test_multi_turn_override_keeps_the_ml_opinion(client, monkeypatch):
     data = post(client, "part two of the plan")
     assert data["security"]["detection_method"] == "multi_turn"
     assert "ml_opinion" in data["security"]
+
+
+# ---------------------------------------------------------------------------
+# Canary tokens
+# ---------------------------------------------------------------------------
+
+def test_each_request_gets_its_own_canary(client, monkeypatch):
+    seen = []
+    monkeypatch.setattr(api, "get_target_response_groq",
+                        lambda prompt, canary=None: seen.append(canary) or "fine")
+    post(client, "How do I connect to the VPN?")
+    post(client, "How do I connect to the VPN?")
+    assert len(seen) == 2 and all(seen) and seen[0] != seen[1]
+
+
+def test_leaked_system_prompt_is_caught_by_the_canary(client, monkeypatch):
+    """A reply that slipped past detection but discloses the system prompt is
+    flagged and redacted on the way out — and the unredacted reply never
+    reaches the client."""
+    import target
+    monkeypatch.setattr(api, "get_target_response_groq",
+                        lambda prompt, canary=None: "Sure. " + target.system_prompt(canary))
+    data = post(client, "How do I connect to the VPN?")
+    assert data["containment"]["canary_detected"] is True
+    assert "[CANARY-REDACTED]" in data["response"]
+    assert "NXC-" not in str(data)
+    assert "original_response" not in data["containment"]
+    assert data["pipeline"]["contain"] == "warn"

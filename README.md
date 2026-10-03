@@ -293,7 +293,8 @@ Cheapest first: `regex (0.15 ms) → ML classifier (~4 ms) → LLM (~500 ms)`.
 ### Layer 4 — Output Containment
 - Scans LLM responses for leaked patterns (AWS keys, DB credentials, SSNs)
 - Redacts any leaked data with `[REDACTED]`
-- **Canary token detection**: Hidden token in system prompt — if it appears in output, proves system prompt was leaked
+- **Canary token detection**: every request gets a fresh random token (`NXC-` + 16 hex characters) placed in the target's system prompt. If it appears in the reply, the system prompt leaked: the reply is flagged and the token redacted. A new token per request (the approach Rebuff uses) means it cannot be guessed from the source code and each leak is traceable to its request.
+- **Nothing unredacted reaches the client**: the API's `containment` field omits the original reply, so redacted credentials and canaries are not shipped to the browser in the JSON either.
 
 ---
 

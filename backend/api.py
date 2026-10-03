@@ -51,6 +51,7 @@ from defense import (
     local_pattern_detector,
     ml_opinion,
     attach_ml_opinion,
+    new_canary,
 )
 from target import get_target_response_groq, get_target_response
 from evaluation import get_ground_truth
@@ -128,6 +129,16 @@ def _record_ground_truth(message: str, is_malicious: bool):
             session.eval_fp += 1
         else:
             session.eval_fn += 1
+
+
+def _public_containment(contained: dict) -> dict:
+    """Containment result for the client, without the unredacted reply.
+
+    contain_output() keeps "original_response" for server-side use; sending it
+    to the browser would hand over exactly what containment just redacted —
+    leaked credentials and the canary token.
+    """
+    return {k: v for k, v in contained.items() if k != "original_response"}
 
 
 def _record_ml_shadow(message: str, security: dict, is_malicious: bool):
@@ -229,14 +240,17 @@ async def chat(req: ChatRequest):
     import time
     start = time.time()
     raw_message = req.message  # preserve original before any sanitization
+    # One canary per request: it goes into the target's system prompt, and
+    # contain_output() treats its appearance in a reply as a prompt leak.
+    canary = new_canary()
 
     # ── COMPARISON MODE ─────────────────────────────────────────────────
     if req.comparison_mode:
         # 1) Unshielded path — raw LLM response (MUST use raw_message)
         try:
-            raw_response = (get_target_response_groq(raw_message)
+            raw_response = (get_target_response_groq(raw_message, canary=canary)
                            if req.test_mode
-                           else get_target_response(raw_message))
+                           else get_target_response(raw_message, canary=canary))
         except Exception as e:
             raw_response = f"Error: {str(e)}"
 
@@ -267,12 +281,12 @@ async def chat(req: ChatRequest):
                 shielded_pipeline["reprompt"] = "warn"
                 try:
                     shielded_response = (
-                        get_target_response_groq(reprompt["reprompted_query"])
+                        get_target_response_groq(reprompt["reprompted_query"], canary=canary)
                         if req.test_mode
-                        else get_target_response(reprompt["reprompted_query"]))
+                        else get_target_response(reprompt["reprompted_query"], canary=canary))
                 except Exception as e:
                     shielded_response = f"Error: {str(e)}"
-                contained = contain_output(shielded_response)
+                contained = contain_output(shielded_response, canary=canary)
                 shielded_pipeline["contain"] = "warn" if contained["is_leaked"] else "pass"
                 shielded_response = contained["filtered_response"]
                 if contained["is_leaked"]:
@@ -286,12 +300,12 @@ async def chat(req: ChatRequest):
                 session.blocked_count += 1
         else:
             try:
-                shielded_response = (get_target_response_groq(sanitized)
+                shielded_response = (get_target_response_groq(sanitized, canary=canary)
                                     if req.test_mode
-                                    else get_target_response(sanitized))
+                                    else get_target_response(sanitized, canary=canary))
             except Exception as e:
                 shielded_response = f"Error: {str(e)}"
-            contained = contain_output(shielded_response)
+            contained = contain_output(shielded_response, canary=canary)
             shielded_pipeline["contain"] = "warn" if contained["is_leaked"] else "pass"
             shielded_response = contained["filtered_response"]
             if contained["is_leaked"]:
@@ -319,9 +333,9 @@ async def chat(req: ChatRequest):
     # ── SHIELD OFF ──────────────────────────────────────────────────────
     if not req.shield_enabled:
         try:
-            response = (get_target_response_groq(raw_message)
+            response = (get_target_response_groq(raw_message, canary=canary)
                        if req.test_mode
-                       else get_target_response(raw_message))
+                       else get_target_response(raw_message, canary=canary))
         except Exception as e:
             response = f"Error: {str(e)}"
         session.safe_count += 1
@@ -364,13 +378,13 @@ async def chat(req: ChatRequest):
         if reprompt.get("can_reprompt") and reprompt.get("reprompted_query"):
             pipeline["reprompt"] = "warn"
             try:
-                response = (get_target_response_groq(reprompt["reprompted_query"])
+                response = (get_target_response_groq(reprompt["reprompted_query"], canary=canary)
                            if req.test_mode
-                           else get_target_response(reprompt["reprompted_query"]))
+                           else get_target_response(reprompt["reprompted_query"], canary=canary))
             except Exception as e:
                 response = f"Error: {str(e)}"
 
-            contained = contain_output(response)
+            contained = contain_output(response, canary=canary)
             pipeline["contain"] = "warn" if contained["is_leaked"] else "pass"
             if contained["is_leaked"]:
                 session.containment_count += 1
@@ -384,7 +398,7 @@ async def chat(req: ChatRequest):
                 "reprompted_query": reprompt["reprompted_query"],
                 "explanation": reprompt.get("explanation", ""),
                 "security": security,
-                "containment": contained,
+                "containment": _public_containment(contained),
                 "pipeline": pipeline,
                 "metrics": get_metrics()
             }
@@ -405,13 +419,13 @@ async def chat(req: ChatRequest):
     pipeline["detect"] = "pass"
     pipeline["reprompt"] = "skip"
     try:
-        response = (get_target_response_groq(sanitized)
+        response = (get_target_response_groq(sanitized, canary=canary)
                    if req.test_mode
-                   else get_target_response(sanitized))
+                   else get_target_response(sanitized, canary=canary))
     except Exception as e:
         response = f"Error: {str(e)}"
 
-    contained = contain_output(response)
+    contained = contain_output(response, canary=canary)
     pipeline["contain"] = "warn" if contained["is_leaked"] else "pass"
     if contained["is_leaked"]:
         session.containment_count += 1
@@ -422,7 +436,7 @@ async def chat(req: ChatRequest):
         "type": "safe",
         "response": contained["filtered_response"],
         "security": security,
-        "containment": contained,
+        "containment": _public_containment(contained),
         "pipeline": pipeline,
         "metrics": get_metrics()
     }
