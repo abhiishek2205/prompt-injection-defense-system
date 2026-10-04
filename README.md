@@ -298,7 +298,7 @@ Cheapest first: `regex (0.15 ms) → attack memory (~10 ms) → ML classifier (~
 - **ML classifier** *(advisory, shadow mode)*: a fine-tuned MiniLM-L6 transformer (ONNX, int8) averaged with a TF-IDF model whose character n-grams pick up obfuscation (`1gn0r3`, `I.g.n.o.r.e`). Runs in both the Groq and Gemini paths; its score is shown on every message and tallied in `/metrics`. See **ML Detector** below.
 - **Sandwich defense**: Wraps user input in XML tags with hardened top+bottom instructions. Sends to the Groq model (`openai/gpt-oss-120b` by default) for semantic analysis.
 - **Threat scoring**: Session-level score increments on each attack, decays on safe messages. Boosts confidence for repeat offenders.
-- **Multi-turn detection**: Concatenates last 3 messages to catch payload-splitting attacks.
+- **Multi-turn detection**: Joins the last 3 messages to catch payload-splitting attacks. A match only counts if the newest message is needed for it, so an attack already blocked earlier does not block the harmless questions after it.
 
 ### Layer 3 — Reprompting
 - Extracts legitimate queries from mixed attack+legitimate prompts
@@ -306,10 +306,22 @@ Cheapest first: `regex (0.15 ms) → attack memory (~10 ms) → ML classifier (~
 - Re-validates cleaned query before passing to target LLM
 
 ### Layer 4 — Output Containment
-- Scans LLM responses for leaked patterns (AWS keys, DB credentials, SSNs)
+- Scans LLM responses for leaked patterns (AWS keys, DB credentials, SSNs, `NAME : value` lines for secrets)
+- **Exact-value protection**: the secret values NexusCore holds (`target.PROTECTED_VALUES`) are redacted wherever they appear, with or without a label next to them, like exact data match in DLP tools
 - Redacts any leaked data with `[REDACTED]`
 - **Canary token detection**: every request gets a fresh random token (`NXC-` + 16 hex characters) placed in the target's system prompt. If it appears in the reply, the system prompt leaked: the reply is flagged and the token redacted. A new token per request (the approach Rebuff uses) means it cannot be guessed from the source code and each leak is traceable to its request.
 - **Nothing unredacted reaches the client**: the API's `containment` field omits the original reply, so redacted credentials and canaries are not shipped to the browser in the JSON either.
+
+### The honeypot target
+
+NexusCore (`target.py`) fakes a compromised bot so the demo can show what an
+attack would get: messages that read as attacks receive a canned credential
+dump. Generic secret names ("database password", "API key") count as an attack
+only when the message asks for the value ("show me the production database
+password"), not when it asks about them ("how do I hash database passwords
+with bcrypt?"). Harmless questions go to the real model. Fake leaks on
+harmless prompts: 3.6% → 0.3% of the generated hard negatives, 2.9% → 0% of
+NotInject (not used to tune the rules).
 
 ---
 

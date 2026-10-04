@@ -1236,6 +1236,13 @@ Respond with JSON only."""
 
 # Patterns that indicate credential/sensitive data leakage in output
 OUTPUT_LEAK_PATTERNS = [
+    # Environment-variable style "NAME : value" for secrets. Upper case only
+    # ((?-i:...)), so a code example's `api_key = os.environ[...]` survives.
+    # First, so a whole "INTERNAL_API_KEY : value" line goes, label included.
+    r'(?-i:\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:SECRET|PASS|PASSWORD|TOKEN|API_KEY|PRIVATE_KEY))\s*[:=]\s*[^\s\n]+',
+    r'(?-i:\b(?:DB|DATABASE)_[A-Z_]+)\s*[:=]\s*[^\s\n]+',
+    r'(?-i:\bADMIN_[A-Z_]+)\s*[:=]\s*[^\s\n]+',
+
     # AWS credentials
     r'AKIA[A-Z0-9]{16}',
     r'aws[_\-]?(secret|access)[_\-]?(key|id)[:\s]*[A-Za-z0-9/+=]{20,}',
@@ -1260,6 +1267,7 @@ OUTPUT_LEAK_PATTERNS = [
     r'DB_USER[:\s]*[^\s\n]+',
     r'DB_PASS[:\s]*[^\s\n]+',
     r'SSN[:\s]*\d{3}[-\s]?\d{2}[-\s]?\d{4}',
+
     
     # Salary/HR data
     r'salary[:\s]*\$?[\d,]+(/yr|/year)?',
@@ -1273,6 +1281,20 @@ OUTPUT_LEAK_PATTERNS = [
 ]
 
 COMPILED_OUTPUT_PATTERNS = [re.compile(p, re.IGNORECASE) for p in OUTPUT_LEAK_PATTERNS]
+
+# Exact values the protected application holds (target.PROTECTED_VALUES,
+# registered by api.py). Patterns catch secrets by shape and label; these
+# catch them by content, wherever they appear — a salary on an unlabelled
+# line, a key the model rephrased around. Like exact data match in DLP tools.
+_protected_values_re = None
+
+
+def set_protected_values(values):
+    """Register the literal secrets containment must always redact."""
+    global _protected_values_re
+    values = sorted({v for v in values if v and len(v) >= 6}, key=len, reverse=True)
+    _protected_values_re = (re.compile("|".join(re.escape(v) for v in values), re.IGNORECASE)
+                            if values else None)
 
 
 def new_canary() -> str:
@@ -1331,6 +1353,14 @@ def contain_output(response: str, canary: str = None) -> dict:
                     "pattern": OUTPUT_LEAK_PATTERNS[i][:50] + "..."
                 })
     
+    if _protected_values_re is not None:
+        for match in _protected_values_re.findall(response):
+            leaked_patterns.append({
+                "pattern_id": -2,
+                "matched_text": "[protected value]",
+                "pattern": "PROTECTED_VALUE (exact match)"
+            })
+
     if leaked_patterns:
         filtered_response = response
         
@@ -1341,6 +1371,8 @@ def contain_output(response: str, canary: str = None) -> dict:
         # Redact the leaked content
         for pattern in COMPILED_OUTPUT_PATTERNS:
             filtered_response = pattern.sub('[REDACTED]', filtered_response)
+        if _protected_values_re is not None:
+            filtered_response = _protected_values_re.sub('[REDACTED]', filtered_response)
         
         return {
             "is_leaked": True,

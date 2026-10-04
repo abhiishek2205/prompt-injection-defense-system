@@ -59,9 +59,13 @@ from defense import (
     attach_ml_opinion,
     attach_memory_opinion,
     new_canary,
+    set_protected_values,
 )
-from target import get_target_response_groq, get_target_response
+from target import PROTECTED_VALUES, get_target_response_groq, get_target_response
 from evaluation import get_ground_truth
+
+# Containment redacts these wherever they appear, whatever surrounds them.
+set_protected_values(PROTECTED_VALUES)
 
 app = FastAPI()
 
