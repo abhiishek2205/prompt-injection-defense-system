@@ -36,7 +36,13 @@ for _key, _mode in (("GROQ_API_KEY", "test mode (Groq)"),
 # Add svnit_ps1 directory to path so defense/target/evaluation are found
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from fastapi import FastAPI
+import re
+import threading
+import time
+from collections import OrderedDict
+from typing import Optional
+
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -53,9 +59,13 @@ from defense import (
     attach_ml_opinion,
     attach_memory_opinion,
     new_canary,
+    set_protected_values,
 )
-from target import get_target_response_groq, get_target_response
+from target import PROTECTED_VALUES, get_target_response_groq, get_target_response
 from evaluation import get_ground_truth
+
+# Containment redacts these wherever they appear, whatever surrounds them.
+set_protected_values(PROTECTED_VALUES)
 
 app = FastAPI()
 
@@ -74,15 +84,15 @@ class ChatRequest(BaseModel):
     comparison_mode: bool = False
 
 class SessionState:
-    """Per-process counters for the demo.
+    """Counters and threat score for one browser session.
 
-    NOTE: this is deliberately a single global — the demo UI shows one shared
-    metrics bar. Every field is set in __init__ (never as a class attribute),
-    because a class-level list would be shared across instances and would not
-    be replaced by reset().
+    Every field is set in reset() (never as a class attribute), because a
+    class-level list would be shared across instances and would not be
+    replaced by reset().
     """
 
     def __init__(self):
+        self.last_seen = time.monotonic()
         self.reset()
 
     def reset(self):
@@ -105,10 +115,65 @@ class SessionState:
         self.ml_eval_fn = 0
 
 
-session = SessionState()
+# ── Sessions ─────────────────────────────────────────────────────────────────
+# Each browser tab sends a random id in the X-Session-Id header, so two people
+# using the demo at once get their own threat score and metrics: one judge's
+# attacks must not make the other's harmless questions look suspicious.
+# Requests without the header (curl, tests, older clients) share one default
+# session. The attack memory stays global on purpose: an attack learned from
+# one visitor protects everyone.
+
+SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+DEFAULT_SESSION_ID = "default"
+SESSION_IDLE_SECONDS = 6 * 3600
+MAX_SESSIONS = 2000
 
 
-def _update_threat_score(is_malicious: bool) -> float:
+class SessionStore:
+    """Sessions by id, least recently used first; idle ones are dropped."""
+
+    def __init__(self, idle_seconds=SESSION_IDLE_SECONDS, max_sessions=MAX_SESSIONS):
+        self.idle_seconds = idle_seconds
+        self.max_sessions = max_sessions
+        self._sessions = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, session_id: str) -> SessionState:
+        now = time.monotonic()
+        with self._lock:
+            state = self._sessions.pop(session_id, None) or SessionState()
+            state.last_seen = now
+            self._sessions[session_id] = state
+            while len(self._sessions) > 1:
+                oldest = next(iter(self._sessions.values()))
+                if (len(self._sessions) <= self.max_sessions
+                        and now - oldest.last_seen <= self.idle_seconds):
+                    break
+                self._sessions.popitem(last=False)
+            return state
+
+    def __len__(self):
+        return len(self._sessions)
+
+    def clear(self):
+        with self._lock:
+            self._sessions.clear()
+
+
+sessions = SessionStore()
+
+
+def current_session(x_session_id: Optional[str] = Header(default=None)) -> SessionState:
+    """FastAPI dependency: the caller's session, from the X-Session-Id header."""
+    if x_session_id is None:
+        return sessions.get(DEFAULT_SESSION_ID)
+    if not SESSION_ID_PATTERN.match(x_session_id):
+        raise HTTPException(status_code=400,
+                            detail="X-Session-Id must be 8-64 letters, digits, '-' or '_'.")
+    return sessions.get(x_session_id)
+
+
+def _update_threat_score(session: SessionState, is_malicious: bool) -> float:
     """Advance the session threat score using the shared Config constants."""
     if is_malicious:
         session.threat_score = min(Config.THREAT_SCORE_MAX,
@@ -119,7 +184,7 @@ def _update_threat_score(is_malicious: bool) -> float:
     return session.threat_score
 
 
-def _record_ground_truth(message: str, is_malicious: bool):
+def _record_ground_truth(session: SessionState, message: str, is_malicious: bool):
     """Score the verdict against the labeled test set, if the prompt is in it."""
     ground_truth = get_ground_truth(message)
     if not ground_truth.get("label"):
@@ -175,7 +240,7 @@ def _memory_stats() -> dict:
         return {"available": False}
 
 
-def _record_ml_shadow(message: str, security: dict, is_malicious: bool):
+def _record_ml_shadow(session: SessionState, message: str, security: dict, is_malicious: bool):
     """Count the ML tier's opinion against the pipeline's verdict.
 
     The pipeline verdict includes multi-turn detection, which the classifier
@@ -199,7 +264,7 @@ def _record_ml_shadow(message: str, security: dict, is_malicious: bool):
         session.ml_eval_fn += 1
 
 
-def _detect(req, sanitized):
+def _detect(req, sanitized, session: SessionState):
     """Layer 2 for both the shielded and comparison paths.
 
     Runs single-turn detection, then multi-turn detection over the recent
@@ -235,7 +300,7 @@ def _detect(req, sanitized):
 
 
 @app.get("/metrics")
-def get_metrics():
+def get_metrics(session: SessionState = Depends(current_session)):
     avg_lat = (sum(session.eval_latencies) /
                len(session.eval_latencies)) if session.eval_latencies else 0
     return {
@@ -268,13 +333,12 @@ def get_threat_level_local(score):
     return "LOW"
 
 @app.post("/reset")
-def reset_session():
+def reset_session(session: SessionState = Depends(current_session)):
     session.reset()
     return {"status": "reset"}
 
 @app.post("/chat")
-async def chat(req: ChatRequest):
-    import time
+async def chat(req: ChatRequest, session: SessionState = Depends(current_session)):
     start = time.time()
     raw_message = req.message  # preserve original before any sanitization
     # One canary per request: it goes into the target's system prompt, and
@@ -293,13 +357,13 @@ async def chat(req: ChatRequest):
 
         # 2) Shielded path — full defense pipeline
         sanitized = sanitize_input(req.message)
-        security = _detect(req, sanitized)
+        security = _detect(req, sanitized, session)
         _learn_from_verdict(sanitized, security)
 
         is_malicious = security.get("is_malicious", False)
-        _update_threat_score(is_malicious)
-        _record_ground_truth(req.message, is_malicious)
-        _record_ml_shadow(req.message, security, is_malicious)
+        _update_threat_score(session, is_malicious)
+        _record_ground_truth(session, req.message, is_malicious)
+        _record_ml_shadow(session, req.message, security, is_malicious)
         shielded_type = "safe"
         shielded_response = ""
         shielded_pipeline = {"sanitize": "pass", "detect": "pass",
@@ -369,7 +433,7 @@ async def chat(req: ChatRequest):
                 "type": "unshielded",
                 "response": raw_response,
             },
-            "metrics": get_metrics()
+            "metrics": get_metrics(session)
         }
 
     # ── SHIELD OFF ──────────────────────────────────────────────────────
@@ -387,7 +451,7 @@ async def chat(req: ChatRequest):
             "response": response,
             "pipeline": {"sanitize":"skip","detect":"skip",
                         "reprompt":"skip","contain":"skip"},
-            "metrics": get_metrics()
+            "metrics": get_metrics(session)
         }
 
     # LAYER 1: Sanitize
@@ -397,13 +461,13 @@ async def chat(req: ChatRequest):
     # _detect() reads the threat score from before this message, so the
     # elevated-threat boost reflects the session's prior history; the score is
     # advanced afterwards.
-    security = _detect(req, sanitized)
+    security = _detect(req, sanitized, session)
     _learn_from_verdict(sanitized, security)
 
     is_malicious = security.get("is_malicious", False)
-    _update_threat_score(is_malicious)
-    _record_ground_truth(req.message, is_malicious)
-    _record_ml_shadow(req.message, security, is_malicious)
+    _update_threat_score(session, is_malicious)
+    _record_ground_truth(session, req.message, is_malicious)
+    _record_ml_shadow(session, req.message, security, is_malicious)
 
     pipeline = {"sanitize": "pass", "detect": "pass",
                 "reprompt": "skip", "contain": "skip"}
@@ -445,7 +509,7 @@ async def chat(req: ChatRequest):
                 "security": security,
                 "containment": _public_containment(contained),
                 "pipeline": pipeline,
-                "metrics": get_metrics()
+                "metrics": get_metrics(session)
             }
         else:
             pipeline["reprompt"] = "fail"
@@ -457,7 +521,7 @@ async def chat(req: ChatRequest):
                 "response": "",
                 "security": security,
                 "pipeline": pipeline,
-                "metrics": get_metrics()
+                "metrics": get_metrics(session)
             }
 
     # SAFE PATH — Layer 4
@@ -485,5 +549,23 @@ async def chat(req: ChatRequest):
         "security": security,
         "containment": _public_containment(contained),
         "pipeline": pipeline,
-        "metrics": get_metrics()
+        "metrics": get_metrics(session)
     }
+
+class EvaluateRequest(BaseModel):
+    message: str
+    test_mode: bool = True
+
+
+@app.post("/evaluate")
+async def evaluate(req: EvaluateRequest):
+    """Run one prompt through the shielded pipeline in a throwaway session.
+
+    For the dashboard's scorecard: each prompt is judged on its own — no chat
+    history, a threat score of zero — and the caller's session metrics and
+    threat score are left untouched. Same response shape as /chat.
+    """
+    return await chat(ChatRequest(message=req.message, test_mode=req.test_mode,
+                                  shield_enabled=True, comparison_mode=False,
+                                  chat_history=[]),
+                      session=SessionState())

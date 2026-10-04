@@ -4,6 +4,7 @@ import TopBar from './components/TopBar'
 import Composer from './components/Composer'
 import EmptyState from './components/EmptyState'
 import { Checking, Comparison, Reply } from './components/Message'
+import Scorecard, { useScorecard } from './components/Scorecard'
 import { AlertIcon } from './components/icons'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
@@ -21,6 +22,34 @@ const EMPTY_METRICS = {
 }
 
 const THEME_KEY = 'promptshield-theme'
+const SESSION_KEY = 'promptshield-session'
+
+// One id per browser tab, sent as X-Session-Id: the backend keeps a separate
+// threat score and metrics for each, so visitors don't affect each other.
+// sessionStorage keeps it across reloads of the tab; it may be unavailable,
+// in which case the id lasts until the page is closed.
+function newSessionId() {
+    const bytes = new Uint8Array(16)
+    crypto.getRandomValues(bytes)
+    return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+}
+
+const SESSION_ID = (() => {
+    try {
+        const saved = sessionStorage.getItem(SESSION_KEY)
+        if (saved) return saved
+        const id = newSessionId()
+        sessionStorage.setItem(SESSION_KEY, id)
+        return id
+    } catch {
+        return newSessionId()
+    }
+})()
+
+const api = (path, options = {}) => fetch(`${API}${path}`, {
+    ...options,
+    headers: { ...options.headers, 'X-Session-Id': SESSION_ID },
+})
 
 function initialTheme() {
     // index.html sets data-theme before the first paint; light unless chosen.
@@ -37,6 +66,8 @@ export default function App() {
     const [metrics, setMetrics] = useState(EMPTY_METRICS)
     const [theme, setTheme] = useState(initialTheme)
     const [menuOpen, setMenuOpen] = useState(false)
+    const [view, setView] = useState('chat')              // 'chat' | 'scorecard'
+    const scorecard = useScorecard(api, testMode)
 
     const lastAskRef = useRef(null)
     const inputRef = useRef(null)
@@ -49,7 +80,7 @@ export default function App() {
 
     // ── Poll metrics ─────────────────────────────────────────────────────────
     useEffect(() => {
-        const load = () => fetch(`${API}/metrics`)
+        const load = () => api('/metrics')
             .then(r => r.ok && r.json())
             .then(d => d && setMetrics(d))
             .catch(() => { /* backend offline */ })
@@ -73,7 +104,7 @@ export default function App() {
         setMessages(prev => [...prev, { role: 'user', content: text }])
         setIsLoading(true)
         try {
-            const res = await fetch(`${API}/chat`, {
+            const res = await api('/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -124,7 +155,7 @@ export default function App() {
 
     // ── Reset ────────────────────────────────────────────────────────────────
     const resetChat = useCallback(async () => {
-        try { await fetch(`${API}/reset`, { method: 'POST' }) } catch { /* ok */ }
+        try { await api('/reset', { method: 'POST' }) } catch { /* ok */ }
         setMessages([])
         setMenuOpen(false)
         setMetrics(prev => ({ ...prev, ...EMPTY_METRICS, attack_memory: prev.attack_memory }))
@@ -133,7 +164,14 @@ export default function App() {
     const fillInput = (text) => {
         setInput(text)
         setMenuOpen(false)
-        inputRef.current?.focus()
+        setView('chat')
+        setTimeout(() => inputRef.current?.focus())
+    }
+
+    const runScorecard = () => {
+        setMenuOpen(false)
+        setView('scorecard')
+        if (!scorecard.running) scorecard.start()
     }
 
     const empty = messages.length === 0 && !isLoading
@@ -141,7 +179,8 @@ export default function App() {
 
     return (
         <div className="app">
-            <Sidebar metrics={metrics} onNewChat={resetChat} onPick={fillInput}
+            <Sidebar metrics={metrics} onNewChat={() => { setView('chat'); resetChat() }} onPick={fillInput}
+                onRunAll={runScorecard} scoring={scorecard.running}
                 open={menuOpen} onClose={() => setMenuOpen(false)} />
             {menuOpen && <div className="scrim" onClick={() => setMenuOpen(false)} />}
 
@@ -158,35 +197,45 @@ export default function App() {
                     </div>
                 )}
 
-                <div className={`thread ${empty ? 'thread--empty' : ''}`}>
-                    <div className="thread__inner">
-                        {empty ? (
-                            <EmptyState onPick={fillInput} shieldOn={shieldEnabled} />
-                        ) : (
-                            <>
-                                {messages.map((msg, i) => msg.role === 'user' ? (
-                                    <div key={i} className="ask"
-                                        ref={i === lastAsk ? lastAskRef : null}>
-                                        <p>{msg.content}</p>
-                                    </div>
-                                ) : msg.isComparison ? (
-                                    <Comparison key={i} msg={msg} />
-                                ) : (
-                                    <Reply key={i} msg={msg} />
-                                ))}
-                                {isLoading && <Checking />}
-                            </>
-                        )}
+                {view === 'scorecard' ? (
+                    <div className="thread">
+                        <Scorecard rows={scorecard.rows} running={scorecard.running} learned={scorecard.learned}
+                            onRun={scorecard.start} onCancel={scorecard.cancel}
+                            onClose={() => setView('chat')} useGroq={testMode} />
                     </div>
-                </div>
+                ) : (
+                    <>
+                    <div className={`thread ${empty ? 'thread--empty' : ''}`}>
+                        <div className="thread__inner">
+                            {empty ? (
+                                <EmptyState onPick={fillInput} shieldOn={shieldEnabled} />
+                            ) : (
+                                <>
+                                    {messages.map((msg, i) => msg.role === 'user' ? (
+                                        <div key={i} className="ask"
+                                            ref={i === lastAsk ? lastAskRef : null}>
+                                            <p>{msg.content}</p>
+                                        </div>
+                                    ) : msg.isComparison ? (
+                                        <Comparison key={i} msg={msg} />
+                                    ) : (
+                                        <Reply key={i} msg={msg} />
+                                    ))}
+                                    {isLoading && <Checking />}
+                                </>
+                            )}
+                        </div>
+                    </div>
 
-                <div className="dock">
-                    <Composer value={input} onChange={setInput} onSend={sendMessage}
-                        busy={isLoading} inputRef={inputRef} shieldOn={shieldEnabled}
-                        compare={comparisonMode} onCompare={() => setComparisonMode(v => !v)}
-                        useGroq={testMode} onModel={setTestMode} />
-                    <p className="dock__hint">Enter sends. Shift+Enter adds a new line.</p>
-                </div>
+                    <div className="dock">
+                        <Composer value={input} onChange={setInput} onSend={sendMessage}
+                            busy={isLoading} inputRef={inputRef} shieldOn={shieldEnabled}
+                            compare={comparisonMode} onCompare={() => setComparisonMode(v => !v)}
+                            useGroq={testMode} onModel={setTestMode} />
+                        <p className="dock__hint">Enter sends. Shift+Enter adds a new line.</p>
+                    </div>
+                    </>
+                )}
             </main>
         </div>
     )

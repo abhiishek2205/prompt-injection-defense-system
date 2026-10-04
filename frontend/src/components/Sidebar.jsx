@@ -66,7 +66,7 @@ function Session({ metrics }) {
     )
 }
 
-export default function Sidebar({ metrics, onNewChat, onPick, open, onClose }) {
+export default function Sidebar({ metrics, onNewChat, onPick, onRunAll, scoring, open, onClose }) {
     const [expanded, setExpanded] = useState('inject')
 
     return (
@@ -87,9 +87,12 @@ export default function Sidebar({ metrics, onNewChat, onPick, open, onClose }) {
             <nav className="side__scroll" aria-labelledby="library-title">
                 <div className="side__heading-row">
                     <h2 id="library-title" className="side__heading">Attack library</h2>
-                    <span className="side__count">{TOTAL_PRESETS} prompts</span>
+                    <button className="side__run" onClick={onRunAll}
+                        title="Check every prompt in the library and show a scorecard">
+                        {scoring ? 'Running…' : `Run all ${TOTAL_PRESETS}`}
+                    </button>
                 </div>
-                <p className="side__hint">Pick one to load it into the message box.</p>
+                <p className="side__hint">Pick one to load it into the message box, or run them all for a scorecard.</p>
 
                 {PRESET_SECTIONS.map(section => (
                     <div key={section.id} className="lib">

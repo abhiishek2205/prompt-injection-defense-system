@@ -968,37 +968,49 @@ Reply ONLY with JSON."""
 def analyze_conversation_context(messages: list, threat_score: float = None) -> dict:
     """
     Detect payload-splitting attacks across multiple messages.
-    Concatenates recent user messages and runs pattern detection on the combined text.
-    
+
+    Joins the newest message with the ones before it and runs pattern
+    detection on the result. A match only counts if the newest message is
+    needed for it: for some run of recent messages ending with the newest,
+    the joined text matches but the same run without the newest does not.
+
+    Without that rule, one earlier attack in the window would block every
+    harmless follow-up ("How do I hash passwords with bcrypt?") until it
+    scrolled out. That attack was already judged when it was sent; the
+    session threat score is what keeps the session on alert.
+
     Args:
-        messages: Full chat history from session state.
-        
+        messages: Recent chat history, newest last.
+
     Returns:
         dict with is_suspicious, reason, combined_text
     """
-    # Get recent user messages
     recent_user_msgs = [
         m['content'] for m in messages[-Config.MULTI_TURN_WINDOW_SIZE:]
         if m.get('role') == 'user'
     ]
-    
+
     if len(recent_user_msgs) < 2:
         return {"is_suspicious": False, "reason": "Not enough context", "combined_text": ""}
-    
-    combined = ' '.join(recent_user_msgs)
-    
-    # Run pattern detection on combined text
-    result = local_pattern_detector(combined, threat_score)
-    
-    if result.get("is_malicious"):
+
+    for k in range(2, len(recent_user_msgs) + 1):
+        window = recent_user_msgs[-k:]
+        combined = ' '.join(window)
+        result = local_pattern_detector(combined, threat_score)
+        if not result.get("is_malicious"):
+            continue
+        without_newest = local_pattern_detector(' '.join(window[:-1]), threat_score)
+        if without_newest.get("is_malicious"):
+            continue  # the match is in older messages alone
         return {
             "is_suspicious": True,
             "reason": f"Multi-turn attack detected: {result.get('reason', 'Pattern match in combined messages')}",
             "combined_text": combined,
             "confidence": result.get("confidence", 0.75) * 0.9  # Slightly lower confidence for multi-turn
         }
-    
-    return {"is_suspicious": False, "reason": "No multi-turn patterns detected", "combined_text": combined}
+
+    return {"is_suspicious": False, "reason": "No multi-turn patterns detected",
+            "combined_text": ' '.join(recent_user_msgs)}
 
 
 # =============================================================================
@@ -1224,6 +1236,13 @@ Respond with JSON only."""
 
 # Patterns that indicate credential/sensitive data leakage in output
 OUTPUT_LEAK_PATTERNS = [
+    # Environment-variable style "NAME : value" for secrets. Upper case only
+    # ((?-i:...)), so a code example's `api_key = os.environ[...]` survives.
+    # First, so a whole "INTERNAL_API_KEY : value" line goes, label included.
+    r'(?-i:\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:SECRET|PASS|PASSWORD|TOKEN|API_KEY|PRIVATE_KEY))\s*[:=]\s*[^\s\n]+',
+    r'(?-i:\b(?:DB|DATABASE)_[A-Z_]+)\s*[:=]\s*[^\s\n]+',
+    r'(?-i:\bADMIN_[A-Z_]+)\s*[:=]\s*[^\s\n]+',
+
     # AWS credentials
     r'AKIA[A-Z0-9]{16}',
     r'aws[_\-]?(secret|access)[_\-]?(key|id)[:\s]*[A-Za-z0-9/+=]{20,}',
@@ -1248,6 +1267,7 @@ OUTPUT_LEAK_PATTERNS = [
     r'DB_USER[:\s]*[^\s\n]+',
     r'DB_PASS[:\s]*[^\s\n]+',
     r'SSN[:\s]*\d{3}[-\s]?\d{2}[-\s]?\d{4}',
+
     
     # Salary/HR data
     r'salary[:\s]*\$?[\d,]+(/yr|/year)?',
@@ -1261,6 +1281,20 @@ OUTPUT_LEAK_PATTERNS = [
 ]
 
 COMPILED_OUTPUT_PATTERNS = [re.compile(p, re.IGNORECASE) for p in OUTPUT_LEAK_PATTERNS]
+
+# Exact values the protected application holds (target.PROTECTED_VALUES,
+# registered by api.py). Patterns catch secrets by shape and label; these
+# catch them by content, wherever they appear — a salary on an unlabelled
+# line, a key the model rephrased around. Like exact data match in DLP tools.
+_protected_values_re = None
+
+
+def set_protected_values(values):
+    """Register the literal secrets containment must always redact."""
+    global _protected_values_re
+    values = sorted({v for v in values if v and len(v) >= 6}, key=len, reverse=True)
+    _protected_values_re = (re.compile("|".join(re.escape(v) for v in values), re.IGNORECASE)
+                            if values else None)
 
 
 def new_canary() -> str:
@@ -1319,6 +1353,14 @@ def contain_output(response: str, canary: str = None) -> dict:
                     "pattern": OUTPUT_LEAK_PATTERNS[i][:50] + "..."
                 })
     
+    if _protected_values_re is not None:
+        for match in _protected_values_re.findall(response):
+            leaked_patterns.append({
+                "pattern_id": -2,
+                "matched_text": "[protected value]",
+                "pattern": "PROTECTED_VALUE (exact match)"
+            })
+
     if leaked_patterns:
         filtered_response = response
         
@@ -1329,6 +1371,8 @@ def contain_output(response: str, canary: str = None) -> dict:
         # Redact the leaked content
         for pattern in COMPILED_OUTPUT_PATTERNS:
             filtered_response = pattern.sub('[REDACTED]', filtered_response)
+        if _protected_values_re is not None:
+            filtered_response = _protected_values_re.sub('[REDACTED]', filtered_response)
         
         return {
             "is_leaked": True,

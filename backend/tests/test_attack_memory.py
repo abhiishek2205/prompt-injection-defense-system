@@ -172,9 +172,9 @@ def client(monkeypatch):
     monkeypatch.setattr(api, "reprompt_malicious",
                         lambda text, security, use_groq=True:
                         {"can_reprompt": False, "reprompted_query": "", "explanation": ""})
-    api.session.reset()
+    api.sessions.clear()
     yield TestClient(api.app), api, learned
-    api.session.reset()
+    api.sessions.clear()
 
 
 def _post(client, message):
