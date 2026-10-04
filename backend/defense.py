@@ -167,10 +167,16 @@ class Config:
     # negatives (tests/test_attack_memory.py enforces this).
     ATTACK_MEMORY_ENABLED = True
     ATTACK_MEMORY_CAN_BLOCK = True
-    # Self-hardening: remember attacks that leaked the canary, and attacks the
-    # LLM tier blocked with at least this confidence.
+    # Self-hardening: remember attacks that leaked the canary (proof: the
+    # reply contained this request's secret token), and attacks the LLM tier
+    # blocked with at least this confidence — but only when the ML classifier
+    # flagged them too. A memorised attack is blocked locally from then on,
+    # before the LLM is asked again, so one confident judge mistake on a
+    # harmless request ("How do I reset my VPN credentials?") would otherwise
+    # block it for good. Two independent models agreeing is far rarer.
     ATTACK_MEMORY_LEARN = True
     ATTACK_MEMORY_LEARN_MIN_CONFIDENCE = 0.9
+    ATTACK_MEMORY_LEARN_REQUIRES_ML = True
 
 
 # =============================================================================

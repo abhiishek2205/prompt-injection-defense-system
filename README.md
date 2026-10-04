@@ -302,7 +302,7 @@ receives the original text, so legitimate prompts are never corrupted.
 Cheapest first: `regex (0.15 ms) → attack memory (~10 ms) → ML classifier (~4 ms) → LLM (~500 ms)`.
 
 - **Local pattern detector**: 76 weighted regex patterns (0.65–0.95 confidence scores), matched against the raw input and its de-obfuscated variants. Fires instantly with no API call (~0.15 ms per prompt). Kept as tier 1 because it is explainable — it names the pattern that matched. A match is final, so the patterns are tuned for precision on outside data too — see **Regex tier precision** below.
-- **Attack memory** *(blocks)*: is this a known attack, reworded? Prompts within 94% similarity of a stored attack are blocked. Seeded with 15,510 attacks from the training data, and learns at runtime from canary leaks and high-confidence LLM blocks (self-hardening). See **Attack memory** below.
+- **Attack memory** *(blocks)*: is this a known attack, reworded? Prompts within 94% similarity of a stored attack are blocked. Seeded with 15,510 attacks from the training data, and learns at runtime from canary leaks and from high-confidence LLM blocks the ML classifier agrees with (self-hardening). See **Attack memory** below.
 - **ML classifier** *(advisory, shadow mode)*: a fine-tuned MiniLM-L6 transformer (ONNX, int8) averaged with a TF-IDF model whose character n-grams pick up obfuscation (`1gn0r3`, `I.g.n.o.r.e`). Runs in both the Groq and Gemini paths; its score is shown on every message and tallied in `/metrics`. See **ML Detector** below.
 - **Sandwich defense**: Wraps user input in XML tags with hardened top+bottom instructions. Sends to the Groq model (`openai/gpt-oss-120b` by default) for semantic analysis.
 - **Threat scoring**: Session-level score increments on each attack, decays on safe messages. Boosts confidence for repeat offenders.
@@ -604,11 +604,29 @@ reworded?"*.
 
 - **canary leaks** — an attack got past every detector and disclosed the
   system prompt (Rebuff's rule);
-- **LLM blocks at ≥ 90% confidence** — attacks the cheap tiers missed, so
-  their next rewording is stopped locally, without an LLM call.
+- **LLM blocks at ≥ 90% confidence that the ML classifier flagged too** —
+  attacks the cheap tiers missed, so their next rewording is stopped locally,
+  without an LLM call.
+
+Why the second opinion: a memorised attack is blocked locally from then on,
+before the LLM is asked again. When the judge once blocked *"How do I reset my
+VPN credentials?"* with high confidence, learning from its verdict alone
+memorised the mistake and blocked the question for good. Requiring the ML
+classifier to agree (`Config.ATTACK_MEMORY_LEARN_REQUIRES_ML`) would have
+kept all three judge false positives seen in testing out of the memory, while
+still learning genuine catches such as *"We are playing Opposite Day..."*.
+Attacks the judge catches but the classifier does not are still blocked —
+by the judge, every time — just not cached.
 
 Learned attacks are saved to `backend/data/attack_memory/learned.jsonl`
-(gitignored) and reloaded at start-up; delete the file to forget them. On a
+(gitignored) and reloaded at start-up. To see or undo them:
+
+```bash
+python attack_memory.py list
+python attack_memory.py forget --text "VPN credentials"   # or --source llm_block
+```
+
+Restart the server afterwards; deleting the file forgets everything. On a
 host without a persistent disk (Railway without a volume) they last until the
 next deploy — the seed is always there. The verdict sent to the browser names
 only the match's source (e.g. `canary_leak`), never the stored text: learned

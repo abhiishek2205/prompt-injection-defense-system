@@ -21,12 +21,17 @@ At runtime the memory learns (learn()):
 
 - from canary leaks — an attack got past every detector and disclosed the
   system prompt (Rebuff's rule);
-- from high-confidence LLM-tier blocks — attacks the cheap tiers missed, so
-  the next rewording is caught locally without an LLM call.
+- from high-confidence LLM-tier blocks the ML classifier agrees with —
+  attacks the cheap tiers missed, so the next rewording is caught locally
+  without an LLM call.
 
 Learned attacks go to data/attack_memory/learned.jsonl and are reloaded at
-start-up. On hosts with an ephemeral disk (Railway without a volume) they last
-until the next deploy; the seed is always there.
+start-up. An LLM block is learned only if the ML classifier flagged the
+message too (Config.ATTACK_MEMORY_LEARN_REQUIRES_ML): a judge mistake, once
+memorised, would block a harmless request for good. To undo one:
+python attack_memory.py list, then forget --text "..." (restart the server).
+On hosts with an ephemeral disk (Railway without a volume) learned attacks
+last until the next deploy; the seed is always there.
 
 Fails open like ml_detector: missing files or onnxruntime mean "no opinion".
 """
@@ -237,3 +242,59 @@ def reset_cache():
     with _load_lock:
         _memory = None
         _load_failed = False
+
+
+def read_learned(learned_path=LEARNED_PATH):
+    """The attacks learned at runtime, oldest first."""
+    if not os.path.exists(learned_path):
+        return []
+    with open(learned_path, encoding="utf-8") as fh:
+        return [json.loads(line) for line in fh if line.strip()]
+
+
+def forget(learned_path=LEARNED_PATH, text=None, source=None):
+    """Remove learned attacks whose text contains `text` (case-insensitive)
+    and/or whose source is `source`. Returns how many were removed.
+
+    The server reads the file at start-up: restart it to apply.
+    """
+    if text is None and source is None:
+        raise ValueError("say what to forget: text, source, or both")
+    entries = read_learned(learned_path)
+    keep = [e for e in entries
+            if not ((text is None or text.lower() in e["text"].lower())
+                    and (source is None or e.get("source") == source))]
+    if len(keep) != len(entries):
+        with open(learned_path, "w", encoding="utf-8") as fh:
+            for e in keep:
+                fh.write(json.dumps(e, ensure_ascii=False) + "\n")
+    return len(entries) - len(keep)
+
+
+def _main():
+    """python attack_memory.py list | forget --text "..." | forget --source llm_block"""
+    import argparse
+
+    ap = argparse.ArgumentParser(description="List or forget attacks the memory learned at runtime "
+                                             "(a mistake, once learned, is blocked locally from then on).")
+    sub = ap.add_subparsers(dest="command", required=True)
+    sub.add_parser("list", help="show the learned attacks")
+    f = sub.add_parser("forget", help="remove learned attacks; restart the server afterwards")
+    f.add_argument("--text", help="remove entries containing this text (case-insensitive)")
+    f.add_argument("--source", choices=["llm_block", "canary_leak"], help="remove entries from this source")
+    args = ap.parse_args()
+
+    if args.command == "list":
+        entries = read_learned()
+        for e in entries:
+            print(f"{e.get('learned_at', '?'):<21} {e.get('source', '?'):<12} {_preview(e['text'])}")
+        print(f"{len(entries)} learned attack(s) in {LEARNED_PATH}")
+    else:
+        if not (args.text or args.source):
+            ap.error("forget needs --text and/or --source")
+        n = forget(text=args.text, source=args.source)
+        print(f"Forgot {n} learned attack(s). Restart the server to apply." if n else "Nothing matched.")
+
+
+if __name__ == "__main__":
+    _main()
