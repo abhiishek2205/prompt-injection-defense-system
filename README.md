@@ -251,7 +251,6 @@ prompt-injection-defense-system/
 │   ├── fetch_datasets.py        # Downloads public datasets (pinned revisions)
 │   ├── build_seed_corpus.py     # Generates the bundled seed corpus
 │   ├── build_hard_negatives.py  # Generates benign prompts using attack words
-│   ├── app.py                   # Original Streamlit UI (legacy)
 │   ├── requirements.txt         # Runtime dependencies
 │   ├── requirements-dev.txt     # Test-only dependencies
 │   ├── requirements-train.txt   # Training-only dependencies (datasets, pandas)
