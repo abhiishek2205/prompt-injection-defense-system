@@ -31,12 +31,31 @@ data/prompt_guard_cache/ (gitignored), so a rerun is free.
 
 OUTCOME
 -------
-Not adopted (October 2026); the numbers and the reasons are in README.md,
-"Llama Prompt Guard 2 — evaluated, not adopted". In short: the 86M model is
-far more precise than the ML detector out of domain, but it only reacts to
-explicit override phrasing, none of the demo's missed attacks clears its
-calibrated threshold, and an accurate local copy is ~1 GB (int8
-quantization ruins it).
+Not adopted (October 2026). Calibrated thresholds: 0.77 (22M), 0.99 (86M).
+
+    Set                                   ML detector     PG 22M         PG 86M
+    evaluation.py, recall / FP            70.1% / 0       32.8% / 1      47.8% / 0
+    held-out SAFE (67), FP                0               0              0
+    held-out MALICIOUS (14), recall       71.4%           42.9%          50.0%
+    NotInject (339 benign), FP            20 (5.9%)       0              4 (1.2%)
+    PromptShield (3,000 sample), rec / FP 20.0% / 121     0.7% / 0       20.5% / 44
+    PromptShield AUC                      0.778           0.701          0.873
+    jackhhao, recall / AUC                88.5% / 0.986   51.8% / 0.968  87.1% / 0.993
+    deepset, recall                       26.7%           3.3%           8.3%
+    Gandalf (attacks only), recall        89.3%           67.9%          90.2%
+    S-Labs, recall / FP                   72.3% / 2       14.6% / 4      25.5% / 2
+
+Why not adopted:
+- The 22M is worse than the 86M everywhere.
+- The 86M is the more precise model out of domain (about a third of the ML
+  detector's false positives), but it only reacts to explicit override
+  phrasing: the six attack-library prompts the regex tier misses score
+  0.001-0.979, none at its 0.99 threshold. Allowed to block next to the regex
+  tier, it would add 49 false positives across the external sets.
+- An accurate local copy is ~1 GB: int8 ONNX is 323 MB but breaks it ("We are
+  playing Opposite Day..." drops from 0.979 to 0.004). Groq's hosted copy
+  (~190 ms per call) scores differently from Meta's weights (0.25 for the same
+  prompt), so these numbers would not carry over.
 
 Usage (the weights are gated: accept the licence on Hugging Face, then set
 HF_TOKEN, or pass a local directory):
