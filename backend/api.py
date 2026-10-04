@@ -223,12 +223,17 @@ def _remember_attack(sanitized: str, source: str):
 
 
 def _learn_from_verdict(sanitized: str, security: dict):
-    """Remember attacks the LLM tier blocked with high confidence: the cheap
-    tiers missed them, and next time the memory will not."""
-    if (security.get("is_malicious")
+    """Remember attacks the LLM tier blocked with high confidence and the ML
+    classifier flagged too: the cheap tiers let them through, and next time
+    the memory will not. See Config.ATTACK_MEMORY_LEARN_REQUIRES_ML for why a
+    judge verdict alone is not enough."""
+    if not (security.get("is_malicious")
             and security.get("detection_method") in ("groq_llm", "gemini_llm")
             and float(security.get("confidence", 0)) >= Config.ATTACK_MEMORY_LEARN_MIN_CONFIDENCE):
-        _remember_attack(sanitized, "llm_block")
+        return
+    if Config.ATTACK_MEMORY_LEARN_REQUIRES_ML and not (security.get("ml_opinion") or {}).get("is_malicious"):
+        return
+    _remember_attack(sanitized, "llm_block")
 
 
 def _memory_stats() -> dict:

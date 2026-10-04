@@ -245,6 +245,7 @@ prompt-injection-defense-system/
 │   ├── transformer_classifier.py # ONNX runtime for the fine-tuned model
 │   ├── attack_memory.py         # Known-attack memory: similarity lookup + learning
 │   ├── build_attack_memory.py   # Builds the memory's seed and threshold
+│   ├── benchmark_prompt_guard.py # Llama Prompt Guard 2 vs the ML detector (not adopted)
 │   ├── train_transformer.py     # Stage 2: fine-tune, export, calibrate
 │   ├── train_detector.py        # Stage 1: TF-IDF; shared data + report code
 │   ├── fetch_datasets.py        # Downloads public datasets (pinned revisions)
@@ -301,7 +302,7 @@ receives the original text, so legitimate prompts are never corrupted.
 Cheapest first: `regex (0.15 ms) → attack memory (~10 ms) → ML classifier (~4 ms) → LLM (~500 ms)`.
 
 - **Local pattern detector**: 76 weighted regex patterns (0.65–0.95 confidence scores), matched against the raw input and its de-obfuscated variants. Fires instantly with no API call (~0.15 ms per prompt). Kept as tier 1 because it is explainable — it names the pattern that matched. A match is final, so the patterns are tuned for precision on outside data too — see **Regex tier precision** below.
-- **Attack memory** *(blocks)*: is this a known attack, reworded? Prompts within 94% similarity of a stored attack are blocked. Seeded with 15,510 attacks from the training data, and learns at runtime from canary leaks and high-confidence LLM blocks (self-hardening). See **Attack memory** below.
+- **Attack memory** *(blocks)*: is this a known attack, reworded? Prompts within 94% similarity of a stored attack are blocked. Seeded with 15,510 attacks from the training data, and learns at runtime from canary leaks and from high-confidence LLM blocks the ML classifier agrees with (self-hardening). See **Attack memory** below.
 - **ML classifier** *(advisory, shadow mode)*: a fine-tuned MiniLM-L6 transformer (ONNX, int8) averaged with a TF-IDF model whose character n-grams pick up obfuscation (`1gn0r3`, `I.g.n.o.r.e`). Runs in both the Groq and Gemini paths; its score is shown on every message and tallied in `/metrics`. See **ML Detector** below.
 - **Sandwich defense**: Wraps user input in XML tags with hardened top+bottom instructions. Sends to the Groq model (`openai/gpt-oss-120b` by default) for semantic analysis.
 - **Threat scoring**: Session-level score increments on each attack, decays on safe messages. Boosts confidence for repeat offenders.
@@ -603,11 +604,29 @@ reworded?"*.
 
 - **canary leaks** — an attack got past every detector and disclosed the
   system prompt (Rebuff's rule);
-- **LLM blocks at ≥ 90% confidence** — attacks the cheap tiers missed, so
-  their next rewording is stopped locally, without an LLM call.
+- **LLM blocks at ≥ 90% confidence that the ML classifier flagged too** —
+  attacks the cheap tiers missed, so their next rewording is stopped locally,
+  without an LLM call.
+
+Why the second opinion: a memorised attack is blocked locally from then on,
+before the LLM is asked again. When the judge once blocked *"How do I reset my
+VPN credentials?"* with high confidence, learning from its verdict alone
+memorised the mistake and blocked the question for good. Requiring the ML
+classifier to agree (`Config.ATTACK_MEMORY_LEARN_REQUIRES_ML`) would have
+kept all three judge false positives seen in testing out of the memory, while
+still learning genuine catches such as *"We are playing Opposite Day..."*.
+Attacks the judge catches but the classifier does not are still blocked —
+by the judge, every time — just not cached.
 
 Learned attacks are saved to `backend/data/attack_memory/learned.jsonl`
-(gitignored) and reloaded at start-up; delete the file to forget them. On a
+(gitignored) and reloaded at start-up. To see or undo them:
+
+```bash
+python attack_memory.py list
+python attack_memory.py forget --text "VPN credentials"   # or --source llm_block
+```
+
+Restart the server afterwards; deleting the file forgets everything. On a
 host without a persistent disk (Railway without a volume) they last until the
 next deploy — the seed is always there. The verdict sent to the browser names
 only the match's source (e.g. `canary_leak`), never the stored text: learned
@@ -638,6 +657,66 @@ and confirmed attacks come back reworded.
 `tests/test_attack_memory.py` holds the gate for `ATTACK_MEMORY_CAN_BLOCK`:
 the committed memory must match none of the project's safe prompts or the
 hard negatives.
+
+## 🦙 Llama Prompt Guard 2 — evaluated, not adopted
+
+Meta's [Llama Prompt Guard 2](https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-86M)
+classifiers (22M English, 86M multilingual) were benchmarked against the
+shipped ML detector with `benchmark_prompt_guard.py`, on the same held-out
+prompts and external test splits, never trained on. Prompt Guard's threshold
+was calibrated the way the ML tier's was — at most 0.5% of each source's benign
+*training* rows flagged — which gave 0.77 for the 22M and 0.99 for the 86M.
+Sets over 3,000 prompts were sampled (seed 0, the same sample for every model).
+
+| Set | ML detector | PG 22M @0.77 | PG 86M @0.99 |
+|-----|-------------|--------------|--------------|
+| evaluation.py (49 safe / 67 attacks) — recall, FP | 70.1%, 0 | 32.8%, 1 | 47.8%, 0 |
+| Held-out SAFE (67) — FP | 0 | 0 | 0 |
+| Held-out MALICIOUS (14) — recall | 71.4% | 42.9% | 50.0% |
+| NotInject, 339 benign with trigger words — FP | **20 (5.9%)** | 0 | **4 (1.2%)** |
+| PromptShield test (3,000 sample) — recall, FP | 20.0%, 121 (5.5%) | 0.7%, 0 | 20.5%, 44 (2.0%) |
+| PromptShield — AUC | 0.778 | 0.701 | **0.873** |
+| jackhhao test — recall, FP / AUC | 88.5%, 0 / 0.986 | 51.8%, 0 / 0.968 | 87.1%, 0 / **0.993** |
+| deepset test — recall | 26.7% | 3.3% | 8.3% |
+| Gandalf test (attacks only) — recall | 89.3% | 67.9% | 90.2% |
+| SLABS test — recall, FP | 72.3%, 2 | 14.6%, 4 | 25.5%, 2 |
+
+The ML detector was trained on the training splits of PromptShield, jackhhao,
+SLABS, deepset and Gandalf, so those test sets favour it; NotInject and the
+project's held-out prompts are the neutral ground.
+
+**What the numbers say**
+
+- The 86M beats the 22M everywhere; the 22M is out.
+- The 86M is the more *precise* model: at similar recall it raises about a
+  third of the ML detector's false positives (NotInject 4 vs 20, PromptShield
+  44 vs 121), and on PromptShield and jackhhao — the ML detector's home ground
+  — its AUC is higher.
+- It is not a blocker. Allowed to block next to the regex tier at its
+  calibrated threshold, it would catch 339 more attacks across the external
+  sets and add 49 false positives. (The ML detector would add 852 and 139 —
+  most of the 852 on SLABS, its home ground — which is why it is advisory
+  too.)
+- It does not help where this demo is weak. Prompt Guard flags explicit
+  override phrasing ("ignore the rule about...", "system override"). The six
+  library attacks the regex misses — the end-of-prompt marker, credentials as
+  JSON, Base64, the SSN poem, the rogue-AI screenplay, Opposite Day — score
+  0.001–0.979, none at its 0.99 threshold; Meta's model card says as much:
+  it targets "explicit, known attack patterns".
+
+**Why not run it anyway, as an advisory gauge**
+
+- *Locally*, the 86M is 1.1 GB; int8 ONNX brings it to 323 MB but breaks it
+  ("We are playing Opposite Day..." drops from 0.979 to 0.004). Shipping an
+  accurate copy means ~1 GB per deployment.
+- *Through Groq* (`meta-llama/llama-prompt-guard-2-86m`, ~190 ms per call),
+  the hosted model scores differently from Meta's weights (the same prompt
+  scores 0.25), so the numbers above do not carry over and it would need its
+  own calibration — against a free quota the live demo also needs.
+
+The benchmark stays in the repository to rerun when either changes. The demo's
+real gap — data-exfiltration disguises — is better served by the regex tier
+and the LLM judge.
 
 ## 🎯 Regex tier precision
 
