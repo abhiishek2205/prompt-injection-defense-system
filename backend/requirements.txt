@@ -3,7 +3,6 @@ uvicorn>=0.24.0
 toml>=0.10.2
 google-genai>=1.0.0
 groq>=0.4.0
-streamlit>=1.28.0
 python-dotenv>=1.0.0
 
 # ML detector (Layer 2, Stage 1). Optional at runtime — ml_detector.py fails
