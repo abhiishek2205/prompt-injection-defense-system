@@ -21,6 +21,34 @@ const EMPTY_METRICS = {
 }
 
 const THEME_KEY = 'promptshield-theme'
+const SESSION_KEY = 'promptshield-session'
+
+// One id per browser tab, sent as X-Session-Id: the backend keeps a separate
+// threat score and metrics for each, so visitors don't affect each other.
+// sessionStorage keeps it across reloads of the tab; it may be unavailable,
+// in which case the id lasts until the page is closed.
+function newSessionId() {
+    const bytes = new Uint8Array(16)
+    crypto.getRandomValues(bytes)
+    return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+}
+
+const SESSION_ID = (() => {
+    try {
+        const saved = sessionStorage.getItem(SESSION_KEY)
+        if (saved) return saved
+        const id = newSessionId()
+        sessionStorage.setItem(SESSION_KEY, id)
+        return id
+    } catch {
+        return newSessionId()
+    }
+})()
+
+const api = (path, options = {}) => fetch(`${API}${path}`, {
+    ...options,
+    headers: { ...options.headers, 'X-Session-Id': SESSION_ID },
+})
 
 function initialTheme() {
     // index.html sets data-theme before the first paint; light unless chosen.
@@ -49,7 +77,7 @@ export default function App() {
 
     // ── Poll metrics ─────────────────────────────────────────────────────────
     useEffect(() => {
-        const load = () => fetch(`${API}/metrics`)
+        const load = () => api('/metrics')
             .then(r => r.ok && r.json())
             .then(d => d && setMetrics(d))
             .catch(() => { /* backend offline */ })
@@ -73,7 +101,7 @@ export default function App() {
         setMessages(prev => [...prev, { role: 'user', content: text }])
         setIsLoading(true)
         try {
-            const res = await fetch(`${API}/chat`, {
+            const res = await api('/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -124,7 +152,7 @@ export default function App() {
 
     // ── Reset ────────────────────────────────────────────────────────────────
     const resetChat = useCallback(async () => {
-        try { await fetch(`${API}/reset`, { method: 'POST' }) } catch { /* ok */ }
+        try { await api('/reset', { method: 'POST' }) } catch { /* ok */ }
         setMessages([])
         setMenuOpen(false)
         setMetrics(prev => ({ ...prev, ...EMPTY_METRICS, attack_memory: prev.attack_memory }))

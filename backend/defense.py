@@ -968,37 +968,49 @@ Reply ONLY with JSON."""
 def analyze_conversation_context(messages: list, threat_score: float = None) -> dict:
     """
     Detect payload-splitting attacks across multiple messages.
-    Concatenates recent user messages and runs pattern detection on the combined text.
-    
+
+    Joins the newest message with the ones before it and runs pattern
+    detection on the result. A match only counts if the newest message is
+    needed for it: for some run of recent messages ending with the newest,
+    the joined text matches but the same run without the newest does not.
+
+    Without that rule, one earlier attack in the window would block every
+    harmless follow-up ("How do I hash passwords with bcrypt?") until it
+    scrolled out. That attack was already judged when it was sent; the
+    session threat score is what keeps the session on alert.
+
     Args:
-        messages: Full chat history from session state.
-        
+        messages: Recent chat history, newest last.
+
     Returns:
         dict with is_suspicious, reason, combined_text
     """
-    # Get recent user messages
     recent_user_msgs = [
         m['content'] for m in messages[-Config.MULTI_TURN_WINDOW_SIZE:]
         if m.get('role') == 'user'
     ]
-    
+
     if len(recent_user_msgs) < 2:
         return {"is_suspicious": False, "reason": "Not enough context", "combined_text": ""}
-    
-    combined = ' '.join(recent_user_msgs)
-    
-    # Run pattern detection on combined text
-    result = local_pattern_detector(combined, threat_score)
-    
-    if result.get("is_malicious"):
+
+    for k in range(2, len(recent_user_msgs) + 1):
+        window = recent_user_msgs[-k:]
+        combined = ' '.join(window)
+        result = local_pattern_detector(combined, threat_score)
+        if not result.get("is_malicious"):
+            continue
+        without_newest = local_pattern_detector(' '.join(window[:-1]), threat_score)
+        if without_newest.get("is_malicious"):
+            continue  # the match is in older messages alone
         return {
             "is_suspicious": True,
             "reason": f"Multi-turn attack detected: {result.get('reason', 'Pattern match in combined messages')}",
             "combined_text": combined,
             "confidence": result.get("confidence", 0.75) * 0.9  # Slightly lower confidence for multi-turn
         }
-    
-    return {"is_suspicious": False, "reason": "No multi-turn patterns detected", "combined_text": combined}
+
+    return {"is_suspicious": False, "reason": "No multi-turn patterns detected",
+            "combined_text": ' '.join(recent_user_msgs)}
 
 
 # =============================================================================

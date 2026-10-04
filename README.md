@@ -725,6 +725,16 @@ as the normal path, and `SessionState` fields are per-instance.
 
 ## 🔌 API Reference
 
+### Sessions
+
+Every endpoint reads an optional `X-Session-Id` header (8–64 letters, digits,
+`-` or `_`; anything else is a 400). Each id gets its own threat score and
+counters, so two people using the demo at once don't affect each other. The
+dashboard sends a random id per browser tab. Requests without the header share
+one default session. Sessions idle for 6 hours are dropped, and at most 2,000
+are kept. The attack memory is shared on purpose: an attack learned from one
+visitor protects everyone.
+
 ### POST /chat
 Main chat endpoint.
 
@@ -795,7 +805,7 @@ on shielded messages — see **Blocking decision** above.
 denominator for `avg_latency`.
 
 ### POST /reset
-Resets all session counters and chat history.
+Resets the caller's session: its counters and threat score.
 
 ---
 
