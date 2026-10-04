@@ -42,4 +42,3 @@ backend/data/eval/
 # Attacks the attack memory learns at runtime (backend/attack_memory.py).
 backend/data/attack_memory/
 backend/data/prompt_guard_cache/
-backend/models/prompt_guard/

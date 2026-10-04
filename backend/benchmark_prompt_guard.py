@@ -29,6 +29,15 @@ random sample of that size (seed 0) — the same sample for every model and for
 the ML column. Scores are cached per model in
 data/prompt_guard_cache/ (gitignored), so a rerun is free.
 
+OUTCOME
+-------
+Not adopted (October 2026); the numbers and the reasons are in README.md,
+"Llama Prompt Guard 2 — evaluated, not adopted". In short: the 86M model is
+far more precise than the ML detector out of domain, but it only reacts to
+explicit override phrasing, none of the demo's missed attacks clears its
+calibrated threshold, and an accurate local copy is ~1 GB (int8
+quantization ruins it).
+
 Usage (the weights are gated: accept the licence on Hugging Face, then set
 HF_TOKEN, or pass a local directory):
     python benchmark_prompt_guard.py --model meta-llama/Llama-Prompt-Guard-2-22M
@@ -175,6 +184,7 @@ def main():
 
     import joblib
     from defense import local_pattern_detector, sanitize_input
+    sanitize_input("warm-up")     # creates the Streamlit loggers, so they can be quieted
     td._quiet_streamlit()
 
     guard = PromptGuard(args.model, threads=args.threads)
