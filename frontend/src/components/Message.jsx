@@ -1,4 +1,5 @@
 import { AlertIcon, CheckIcon, RewriteIcon, StopIcon } from './icons'
+import { DETECTORS } from '../labels'
 
 // What each layer's status means, in words a judge can read without the code.
 const STAGES = [
@@ -10,15 +11,6 @@ const STAGES = [
 
 const TONE = { pass: 'ok', warn: 'warn', fail: 'stop', skip: 'idle' }
 
-const METHODS = {
-    local_pattern: 'pattern rules',
-    groq_local_pattern: 'pattern rules',
-    attack_memory: 'attack memory',
-    ml_classifier: 'the ML classifier',
-    multi_turn: 'the multi-turn check',
-    groq_llm: 'the LLM judge (Groq)',
-    gemini_llm: 'the LLM judge (Gemini)',
-}
 
 const pct = (x) => Math.round((x || 0) * 100)
 
@@ -99,8 +91,8 @@ function Verdict({ kind, children }) {
 }
 
 function methodText(security) {
-    const m = METHODS[security?.detection_method]
-    return m ? `by ${m}` : null
+    const d = DETECTORS[security?.detection_method]
+    return d ? `by ${d.by}` : null
 }
 
 // ─── Assistant reply ────────────────────────────────────────────────────────

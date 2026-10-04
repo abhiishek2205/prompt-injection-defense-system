@@ -551,3 +551,21 @@ async def chat(req: ChatRequest, session: SessionState = Depends(current_session
         "pipeline": pipeline,
         "metrics": get_metrics(session)
     }
+
+class EvaluateRequest(BaseModel):
+    message: str
+    test_mode: bool = True
+
+
+@app.post("/evaluate")
+async def evaluate(req: EvaluateRequest):
+    """Run one prompt through the shielded pipeline in a throwaway session.
+
+    For the dashboard's scorecard: each prompt is judged on its own — no chat
+    history, a threat score of zero — and the caller's session metrics and
+    threat score are left untouched. Same response shape as /chat.
+    """
+    return await chat(ChatRequest(message=req.message, test_mode=req.test_mode,
+                                  shield_enabled=True, comparison_mode=False,
+                                  chat_history=[]),
+                      session=SessionState())

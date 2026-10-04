@@ -4,6 +4,7 @@ import TopBar from './components/TopBar'
 import Composer from './components/Composer'
 import EmptyState from './components/EmptyState'
 import { Checking, Comparison, Reply } from './components/Message'
+import Scorecard, { useScorecard } from './components/Scorecard'
 import { AlertIcon } from './components/icons'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
@@ -65,6 +66,8 @@ export default function App() {
     const [metrics, setMetrics] = useState(EMPTY_METRICS)
     const [theme, setTheme] = useState(initialTheme)
     const [menuOpen, setMenuOpen] = useState(false)
+    const [view, setView] = useState('chat')              // 'chat' | 'scorecard'
+    const scorecard = useScorecard(api, testMode)
 
     const lastAskRef = useRef(null)
     const inputRef = useRef(null)
@@ -161,7 +164,14 @@ export default function App() {
     const fillInput = (text) => {
         setInput(text)
         setMenuOpen(false)
-        inputRef.current?.focus()
+        setView('chat')
+        setTimeout(() => inputRef.current?.focus())
+    }
+
+    const runScorecard = () => {
+        setMenuOpen(false)
+        setView('scorecard')
+        if (!scorecard.running) scorecard.start()
     }
 
     const empty = messages.length === 0 && !isLoading
@@ -169,7 +179,8 @@ export default function App() {
 
     return (
         <div className="app">
-            <Sidebar metrics={metrics} onNewChat={resetChat} onPick={fillInput}
+            <Sidebar metrics={metrics} onNewChat={() => { setView('chat'); resetChat() }} onPick={fillInput}
+                onRunAll={runScorecard} scoring={scorecard.running}
                 open={menuOpen} onClose={() => setMenuOpen(false)} />
             {menuOpen && <div className="scrim" onClick={() => setMenuOpen(false)} />}
 
@@ -186,35 +197,45 @@ export default function App() {
                     </div>
                 )}
 
-                <div className={`thread ${empty ? 'thread--empty' : ''}`}>
-                    <div className="thread__inner">
-                        {empty ? (
-                            <EmptyState onPick={fillInput} shieldOn={shieldEnabled} />
-                        ) : (
-                            <>
-                                {messages.map((msg, i) => msg.role === 'user' ? (
-                                    <div key={i} className="ask"
-                                        ref={i === lastAsk ? lastAskRef : null}>
-                                        <p>{msg.content}</p>
-                                    </div>
-                                ) : msg.isComparison ? (
-                                    <Comparison key={i} msg={msg} />
-                                ) : (
-                                    <Reply key={i} msg={msg} />
-                                ))}
-                                {isLoading && <Checking />}
-                            </>
-                        )}
+                {view === 'scorecard' ? (
+                    <div className="thread">
+                        <Scorecard rows={scorecard.rows} running={scorecard.running} learned={scorecard.learned}
+                            onRun={scorecard.start} onCancel={scorecard.cancel}
+                            onClose={() => setView('chat')} useGroq={testMode} />
                     </div>
-                </div>
+                ) : (
+                    <>
+                    <div className={`thread ${empty ? 'thread--empty' : ''}`}>
+                        <div className="thread__inner">
+                            {empty ? (
+                                <EmptyState onPick={fillInput} shieldOn={shieldEnabled} />
+                            ) : (
+                                <>
+                                    {messages.map((msg, i) => msg.role === 'user' ? (
+                                        <div key={i} className="ask"
+                                            ref={i === lastAsk ? lastAskRef : null}>
+                                            <p>{msg.content}</p>
+                                        </div>
+                                    ) : msg.isComparison ? (
+                                        <Comparison key={i} msg={msg} />
+                                    ) : (
+                                        <Reply key={i} msg={msg} />
+                                    ))}
+                                    {isLoading && <Checking />}
+                                </>
+                            )}
+                        </div>
+                    </div>
 
-                <div className="dock">
-                    <Composer value={input} onChange={setInput} onSend={sendMessage}
-                        busy={isLoading} inputRef={inputRef} shieldOn={shieldEnabled}
-                        compare={comparisonMode} onCompare={() => setComparisonMode(v => !v)}
-                        useGroq={testMode} onModel={setTestMode} />
-                    <p className="dock__hint">Enter sends. Shift+Enter adds a new line.</p>
-                </div>
+                    <div className="dock">
+                        <Composer value={input} onChange={setInput} onSend={sendMessage}
+                            busy={isLoading} inputRef={inputRef} shieldOn={shieldEnabled}
+                            compare={comparisonMode} onCompare={() => setComparisonMode(v => !v)}
+                            useGroq={testMode} onModel={setTestMode} />
+                        <p className="dock__hint">Enter sends. Shift+Enter adds a new line.</p>
+                    </div>
+                    </>
+                )}
             </main>
         </div>
     )

@@ -8,6 +8,9 @@ The **Regex** and **ML** columns were checked against the current code: the
 regex tier (`local_pattern_detector`) and the shipped ML model
 (`models/detector.joblib`, threshold 88%).
 
+For the library's 31 prompts in one go, click **Run all 31** above the attack
+library: the scorecard checks each one on its own and lists every mistake.
+
 ## How to read the results
 
 - **Regex BLOCK** — the message is stopped immediately. A regex block is final.
