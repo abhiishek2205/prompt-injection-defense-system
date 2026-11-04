@@ -131,7 +131,6 @@ export default function Sidebar({ metrics, onNewChat, onPick, onRunAll, scoring,
             </nav>
 
             <Session metrics={metrics} />
-            <footer className="side__foot">Team SRON, Echelon Hackathon</footer>
         </aside>
     )
 }

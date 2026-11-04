@@ -225,7 +225,6 @@ h1, h2, h3 { color: var(--ink); font-weight: 600; }
 .session__row dt { color: var(--muted); }
 .session__row dd { color: var(--ink); font-variant-numeric: tabular-nums; text-align: right; }
 
-.side__foot { padding: 10px 0 14px; font-size: 12px; color: var(--faint); }
 
 /* ─── Top bar ───────────────────────────────────────────────────────────── */
 
